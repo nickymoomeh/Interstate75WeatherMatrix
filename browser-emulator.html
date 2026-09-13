@@ -27,7 +27,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .small{font-size:12px;color:var(--muted)}
 details{margin-top:14px}summary{cursor:pointer;color:#c9d1d9}
 code{background:#0d1117;padding:2px 5px;border-radius:4px}
-@media(max-width:820px){.wrap{grid-template-columns:1fr}.card{padding:14px}}
+@media(max-width:820px){.wrap{grid-template-columns:minmax(0,1fr);padding:16px}.card{padding:14px}}
 </style>
 </head>
 <body>
@@ -36,7 +36,7 @@ code{background:#0d1117;padding:2px 5px;border-radius:4px}
     <h1>Interstate 75 Weather Matrix</h1>
     <p>Browser emulator for the standalone 64×64 Open-Meteo edition.</p>
     <canvas id="matrix" width="64" height="64" aria-label="64 by 64 weather matrix emulator"></canvas>
-    <div id="status" class="status">Starting with London weather…</div>
+    <div id="status" role="status" aria-live="polite" class="status">Starting with London weather…</div>
   </section>
 
   <section class="card">
@@ -63,12 +63,16 @@ code{background:#0d1117;padding:2px 5px;border-radius:4px}
     </div>
     <div class="row" style="margin-top:10px">
       <button id="abductBtn">Trigger abduction</button>
+      <button id="rainBtn">Preview rain: light</button>
     </div>
 
     <details>
       <summary>How it works</summary>
-      <p class="small">The page calls Open-Meteo directly from your browser. Weather refreshes every 10 minutes; animation runs locally. Settings are saved only in your browser using <code>localStorage</code>. No Wi-Fi password or API key is required.</p>
+      <p class="small">The page calls Open-Meteo directly from your browser. Weather refreshes every 10 minutes; animation runs locally. Settings are remembered on this browser when storage is available. No Wi-Fi password or API key is required.</p>
       <p class="small">The 12-hour option deliberately omits AM/PM to preserve the real matrix layout. Three-digit Fahrenheit MIN/MAX values drop the decimal, matching the firmware. Use the Scene control to preview the daytime or night-time animations regardless of the real local time.</p>
+      <p class="small">Rain preview cycles light → moderate → heavy → dry → original weather. Wet previews jump to their target water depth so you can see the effect immediately; dry conditions drain one row per minute. Live rain and snow build by one row every 30 seconds toward the current intensity’s target, rather than adding to a permanent reservoir. MIN/MAX show the whole day’s forecast.</p>
+      <p class="small">Birds visit during daylight; stars and occasional shooting stars appear after sunset. UFOs visit both scenes. At night, the temperature is abducted on the hour and half-hour; the button works anytime. Festive divider lights appear throughout December and January 1–14. The browser stays bright at night.</p>
+      <p class="small">Weather data: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>. <a href="https://github.com/nickymoomeh/Interstate75WeatherMatrix" target="_blank" rel="noopener">Public firmware</a>. An internet connection is needed for live weather and place search; Demo weather works offline.</p>
     </details>
   </section>
 </div>
@@ -76,7 +80,7 @@ code{background:#0d1117;padding:2px 5px;border-radius:4px}
 <script>
 "use strict";
 
-const W=64,H=64, canvas=document.getElementById("matrix"), ctx=canvas.getContext("2d");
+const canvas=document.getElementById("matrix"), ctx=canvas.getContext("2d");
 ctx.imageSmoothingEnabled=false;
 const $=id=>document.getElementById(id);
 const BLACK=[0,0,0], WARM=[255,172,50];
@@ -100,28 +104,53 @@ steady:["0000000","0001000","0001100","1111110","1111111","0001100","0001000","0
 falling_slow:["1000000","0100000","0010000","0001000","0000101","0000011","0001111","0000000","0000000"],
 falling_fast:["0001000","0001000","0001000","0001000","0001000","0111110","0011100","0001000","0000000"]
 };
-const BIRD_COLOURS=[
-[[82,48,22],[150,55,18],[55,38,24],[150,105,22]],[[24,72,120],[130,112,18],[38,95,135],[125,120,55]],
-[[92,58,30],[135,110,72],[55,35,20],[125,86,30]],[[20,22,25],[48,48,52],[8,8,10],[150,92,8]],
-[[35,112,42],[78,145,35],[18,76,38],[175,62,18]],[[118,20,28],[165,38,22],[20,70,125],[175,120,45]],
-[[135,110,18],[165,138,28],[28,105,48],[175,75,15]]
-];
+// Artwork copied from the public sprites.py; embedded to keep this file standalone.
+const FISH_COLOURS=[[118,72,8],[78,96,105],[112,42,24],[18,100,92],[92,38,112],[105,100,18]];
+const FISH_ACCENTS=[[78,40,0],[44,64,72],[72,22,12],[8,58,54],[52,18,70],[62,58,6]];
+const FISH_WIDTHS=[9,11,13];
+const FISH_HEIGHTS=[5,6,7];
+const FISH_TAIL_SHIFT=[0,-1,0,1];
+const FESTIVE_COLOURS=[[110,18,18],[18,92,30],[115,68,0],[15,48,105]];
+const FESTIVE_BRIGHT=[[175,35,28],[30,145,48],[185,112,5],[25,82,165]];
+const UFO_WIDTHS=[7,9,13,5,15];
+const UFO_DOMES=[[[2,0],[3,0],[4,0],[1,1],[2,1],[3,1],[4,1],[5,1]],[[3,0],[4,0],[5,0],[2,1],[3,1],[4,1],[5,1],[6,1]],[[4,0],[5,0],[6,0],[7,0],[8,0],[3,1],[4,1],[5,1],[6,1],[7,1],[8,1],[9,1]],[[2,0]],[[5,0],[6,0],[7,0],[8,0],[9,0],[3,1],[4,1],[5,1],[6,1],[7,1],[8,1],[9,1],[10,1],[11,1]]];
+const UFO_ROWS=[[[0,6,2]],[[1,7,2],[0,8,3]],[[2,10,2],[0,12,3],[2,10,4]],[[1,3,1],[0,4,2]],[[2,12,2],[0,14,3],[1,13,4],[3,11,5]]];
+const UFO_LIGHTS=[[1,3,5],[1,4,7],[2,4,6,8,10],[0,2,4],[1,4,7,10,13]];
+const UFO_LIGHT_Y=[2,3,3,2,4];
+const UFO_BEAM_Y=[3,4,5,3,6];
+const UFO_COLOURS=[[[35,110,105],[90,35,115]],[[110,42,32],[105,95,20]],[[42,72,120],[110,40,82]],[[78,105,28],[25,92,110]],[[112,58,18],[25,105,120]],[[75,62,112],[130,92,18]],[[105,28,82],[28,112,88]]];
+const UFO_DIM_LIGHTS=[[30,11,38],[35,31,6],[36,13,27],[8,30,36],[8,35,40],[43,30,6],[9,37,29]];
+const UFO_DAY_LIGHTS=[[180,70,220],[210,190,40],[220,80,164],[50,184,220],[50,210,220],[220,184,36],[56,220,176]];
+const UFO_BOB=[0,0,-1,-1,0,1,1,0];
+const BIRD_COLOURS=[[[82,48,22],[150,55,18],[55,38,24],[150,105,22]],[[24,72,120],[130,112,18],[38,95,135],[125,120,55]],[[92,58,30],[135,110,72],[55,35,20],[125,86,30]],[[20,22,25],[48,48,52],[8,8,10],[150,92,8]],[[35,112,42],[78,145,35],[18,76,38],[175,62,18]],[[118,20,28],[165,38,22],[20,70,125],[175,120,45]],[[135,110,18],[165,138,28],[28,105,48],[175,75,15]]];
+const BIRD_PECK_BODY=[[4,1],[5,1],[2,2],[3,2],[4,2],[5,2],[6,2],[1,3],[2,3],[3,3],[4,3],[5,3],[6,3],[7,3],[1,4],[2,4],[3,4],[4,4],[5,4],[6,4],[7,4],[2,5],[3,5],[4,5],[5,5],[6,5],[7,5],[3,6],[4,6],[5,6],[6,6],[7,6]];
 const BIRD_BODY=[[5,0],[6,0],[4,1],[5,1],[6,1],[2,2],[3,2],[4,2],[5,2],[6,2],[1,3],[2,3],[3,3],[4,3],[5,3],[6,3],[1,4],[2,4],[3,4],[4,4],[5,4],[2,5],[3,5],[4,5]];
-const BIRD_WINGS=[[[2,3],[3,3],[4,3],[3,4],[4,4]],[[2,2],[3,1],[3,2],[4,2],[4,3]],[[2,3],[3,3],[4,3],[3,4],[3,5]]];
+const BIRD_WING_FRAMES=[[[2,3],[3,3],[4,3],[3,4],[4,4]],[[2,2],[3,1],[3,2],[4,2],[4,3]],[[2,3],[3,3],[4,3],[3,4],[3,5]]];
 const BIRD_WING_SEQUENCE=[0,1,0,2];
 const DUCK_BODY=[[0,4],[1,3],[1,4],[1,5],[2,3],[3,3],[4,3],[5,3],[6,3],[7,3],[8,3],[2,4],[3,4],[4,4],[5,4],[6,4],[7,4],[8,4],[9,4],[10,4],[2,5],[3,5],[4,5],[5,5],[6,5],[7,5],[8,5],[9,5],[10,5],[3,6],[4,6],[5,6],[6,6],[7,6],[8,6],[9,6]];
 const DUCK_HEAD=[[8,0],[9,0],[10,0],[7,1],[8,1],[9,1],[10,1],[11,1],[7,2],[8,2],[9,2],[10,2],[11,2],[8,3],[9,3],[10,3]];
 const DUCK_WING=[[3,4],[4,4],[5,4],[6,4],[7,4],[4,5],[5,5],[6,5],[7,5],[5,6],[6,6]];
-const DUCK_BILL=[[12,2],[13,2],[11,3],[12,3]], DUCKLING=[[0,2],[1,1],[1,2],[2,2],[1,3],[2,3],[2,0],[3,0],[3,1]];
-const UFO_BOB=[0,0,-1,-1,0,1,1,0], LEAF_WAVE=[0,2,4,2,0,-2,-4,-2], SNOW_FLUTTER=[0,1,2,1,0,-1,-2,-1];
+const DUCK_BILL=[[12,2],[13,2],[11,3],[12,3]];
+const DUCKLING_BODY=[[0,2],[1,1],[1,2],[2,2],[1,3],[2,3],[2,0],[3,0],[3,1]];
+const DUCKLING_BILL=[[4,1]];
+const DUCK_COLOURS=[[96,68,24],[18,100,65],[60,42,18],[175,105,12],[155,125,18],[110,75,8]];
+const DUCK_FAMILY_WIDTH=32;
+const ABDUCTION_COLOURS=[[[92,96,112],[42,112,105],[150,112,12],[110,82,8]],[[100,78,116],[92,38,120],[25,125,145],[90,70,135]],[[70,105,118],[28,78,132],[145,42,82],[70,100,145]],[[105,88,62],[125,55,22],[35,125,62],[135,92,18]],[[88,105,72],[68,112,30],[125,38,112],[105,105,25]]];
+const ABDUCTION_DIM_LIGHTS=[[50,37,4],[8,41,48],[48,14,27],[11,41,20],[41,12,37]];
+const ABDUCTION_BEAM_SHADES=[[[58,43,4],[80,60,5],[102,76,7],[124,92,9]],[[48,37,72],[66,51,99],[84,65,126],[102,79,153]],[[37,53,77],[51,73,106],[65,93,135],[79,113,160]],[[72,49,9],[99,67,13],[126,85,16],[153,104,20]],[[56,56,13],[77,77,18],[98,98,23],[119,119,28]]];
+const ABDUCTION_DAY_LIGHTS=[[220,220,24],[50,220,220],[220,84,164],[70,220,124],[220,76,220]];
+const ABDUCTION_DAY_BEAM_SHADES=[[[88,65,6],[117,87,8],[146,109,10],[176,131,12]],[[72,56,108],[96,74,144],[120,93,180],[144,112,216]],[[56,80,116],[74,106,154],[93,133,193],[112,160,220]],[[108,73,14],[144,98,19],[180,122,24],[216,147,28]],[[84,84,20],[112,112,26],[140,140,33],[168,168,40]]];
+const LEAF_FRAMES=[[[0,0],[1,1],[0,1],[-1,-1]],[[0,0],[1,0],[-1,0],[0,1]],[[0,0],[-1,1],[0,1],[1,-1]]];
+const LEAF_FRAME_SEQUENCE=[0,0,0,1,0,0,0,2];
+const LEAF_WAVE=[0,2,4,2,0,-2,-4,-2],SNOW_FLUTTER=[0,1,2,1,0,-1,-2,-1];
 
 let settings={lat:51.5074,lon:-0.1278,unit:"C",clock:24,scene:"auto"};
-let weather=null, lastFetch=0, utcOffset=0, timezone="UTC", demo=false;
+let weather=null, utcOffset=0, timezone="UTC", demo=false;
 let ground={kind:null,level:0,last:0};
 let creature={active:false,next:0,start:0,kind:"bird",species:0,right:true,duration:9000};
-let ufo={active:false,next:0,start:0,right:true,y:8,duration:6500,colour:0};
+let ufo={active:false,next:0,start:0,right:true,y:8,duration:6500,colour:0,style:0,mode:0};
 let fish={active:false,next:0,start:0,right:true,y:58,duration:9000};
-let abduction={active:false,start:0,lastKey:""};
+let abduction={active:false,start:0,lastKey:"",colour:0,manual:false};
 let star={active:false,next:0,start:0,right:true,y:8};
 let changePulse={
   clock:{value:null,until:0},
@@ -131,26 +160,18 @@ let changePulse={
   max:{value:null,until:0},
   pressure:{value:null,until:0}
 };
-const CHANGE_PULSE_MS=1800;
+const CHANGE_PULSE_MS=1500;
 function watchChange(name,value,now){
   const p=changePulse[name];
-  if(p.value===null){p.value=value;return false}
+  if(p.value===null){p.value=value;return 0}
   if(p.value!==value){p.value=value;p.until=now+CHANGE_PULSE_MS}
-  return now<p.until
+  const elapsed=now-(p.until-CHANGE_PULSE_MS);
+  if(elapsed<0||elapsed>=CHANGE_PULSE_MS)return 0;
+  const progress=elapsed/CHANGE_PULSE_MS;return progress<.2?progress/.2:(1-progress)/.8;
 }
-function pulseColour(c,active,now){
-  if(!active)return c;
-  // Alternate between the normal colour and bright white, like the matrix's
-  // attention pulse, without applying any browser brightness cap.
-  return Math.floor(now/140)%2===0 ? [255,255,255] : c;
-}
-
+function pulseColour(c,amount){return c.map((v,i)=>Math.round(v+(WARM[i]-v)*amount))}
 
 function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
-function nightNow(){
-  const d=localDate(), h=d.getUTCHours(), m=d.getUTCMinutes();
-  return h>20||(h===20&&m>=30)||h<7;
-}
 // Browser rendering is deliberately full brightness. The physical matrix uses
 // conservative RGB values because LEDs are much brighter than a monitor.
 function rgb(c){return `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`}
@@ -163,17 +184,20 @@ function ptext(t,x,y,c,s=1){t=String(t).toUpperCase();let cx=x;for(const [i,ch] 
 function outlineText(t,x,y,s=1){for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]])ptext(t,x+dx,y+dy,BLACK,s)}
 function bitmap(rows,x,y,c,th=1){for(let yy=0;yy<rows.length;yy++)for(let xx=0;xx<rows[yy].length;xx++)if(rows[yy][xx]==="1")rect(x+xx,y+yy,th,th,c)}
 function tempC(v){return settings.unit==="F"?(v-32)*5/9:v}
-function tempColour(v){let t=tempC(Number(v));if(!Number.isFinite(t))return[180,180,180];const w=[238,244,245],b=[22,120,238],y=[255,218,26],o=[255,118,16],r=[244,42,38],p=[214,50,232];const blend=(a,z,q)=>a.map((v,i)=>Math.round(v+(z[i]-v)*q));if(t<=1)return w;if(t<=3)return b;if(t<=14)return blend(b,y,(t-3)/11);if(t<=24)return blend(y,o,(t-14)/10);if(t<=28)return blend(o,r,(t-24)/4);if(t<=30)return r;return p}
+function tempColour(v){let t=numberOrNull(v)===null?NaN:tempC(Number(v));if(!Number.isFinite(t))return[180,180,180];const w=[238,244,245],b=[22,120,238],y=[255,218,26],o=[255,118,16],r=[244,42,38],p=[214,50,232];const blend=(a,z,q)=>a.map((v,i)=>Math.round(v+(z[i]-v)*q));if(t<=1)return w;if(t<=3)return b;if(t<=14)return blend(b,y,(t-3)/11);if(t<=24)return blend(y,o,(t-14)/10);if(t<=28)return blend(o,r,(t-24)/4);if(t<=30)return r;return p}
 function pressureColour(t){return t.startsWith("rising")?[57,202,100]:t==="falling_slow"?[255,159,33]:t==="falling_fast"?[245,45,53]:[231,240,241]}
-function localDate(){return new Date(Date.now()+utcOffset*1000)}
+let offsetChecked=0;
+function localDate(){if(Date.now()-offsetChecked>=60000&&timezone!=="UTC"){utcOffset=timezoneOffset(timezone);offsetChecked=Date.now()}return new Date(Date.now()+utcOffset*1000)}
 function clockText(){const d=localDate(),h=d.getUTCHours(),m=d.getUTCMinutes();if(settings.clock===12){const hh=h%12||12;return `${hh}:${String(m).padStart(2,"0")}`}return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`}
 function dayMinute(){const d=localDate();return d.getUTCHours()*60+d.getUTCMinutes()}
 function hmMinutes(s){if(!s)return null;const m=String(s).match(/T(\d\d):(\d\d)/);return m?Number(m[1])*60+Number(m[2]):null}
-function daylight(){if(settings.scene==="day")return true;if(settings.scene==="night")return false;if(!weather)return false;const a=hmMinutes(weather.sunrise),b=hmMinutes(weather.sunset),n=dayMinute();return a!=null&&b!=null&&n>=a&&n<b}
-function afterSunset(){if(settings.scene==="night")return true;if(settings.scene==="day")return false;if(!weather)return false;const a=hmMinutes(weather.sunrise),b=hmMinutes(weather.sunset),n=dayMinute();return a!=null&&b!=null&&(n>=b||n<a)}
-function rand(seed){let x=Math.sin(seed*12.9898+78.233)*43758.5453;return x-Math.floor(x)}
+function daylight(){if(settings.scene==="day")return true;if(settings.scene==="night")return false;if(!weather)return false;const a=hmMinutes(weather.sunrise),b=hmMinutes(weather.sunset),n=dayMinute();return a!=null&&b!=null&&a!==b?n>=a&&n<b:weather.isDay===1}
+function afterSunset(){if(settings.scene==="night")return true;if(settings.scene==="day")return false;if(!weather)return false;const a=hmMinutes(weather.sunrise),b=hmMinutes(weather.sunset),n=dayMinute();return a!=null&&b!=null&&a!==b?(n>=b||n<a):weather.isDay===0}
 
+function festive(){const d=localDate();return d.getUTCMonth()===11||(d.getUTCMonth()===0&&d.getUTCDate()<=14)}
 function divider(y,sec,top=true){
+  if(!weather){rect(2,y,60,1,bright([65,0,0]));rect(2+sec,y-1,1,3,bright([145,0,0]));return}
+  if(festive()){rect(2,y,60,1,top?[0,88,100]:[128,70,0]);const offset=top?0:2;for(let i=0;i<=sec;i++)px(2+i,y,bright(FESTIVE_COLOURS[(i+offset)%4]));rect(2+sec,y-1,1,3,bright(FESTIVE_BRIGHT[(sec+offset)%4]));return}
   // The browser has no hardware brightness limit, so keep the divider and
   // moving seconds marker as vivid as the rest of the display.
   const base=top?[0,88,100]:[128,70,0], edge=top?[0,160,178]:[205,112,0], centre=top?[19,229,238]:[255,192,58], x=2+clamp(sec,0,59);
@@ -182,14 +206,16 @@ function divider(y,sec,top=true){
   if(sec<59)px(x+1,y,edge);
   rect(x,y-1,1,3,centre);
 }
-function formatTemp(v){return Number.isFinite(Number(v))?Number(v).toFixed(1):"--.-"}
-function dailyParts(v){let n=Number(v);if(!Number.isFinite(n))return["--",""];if(settings.unit==="F"&&Math.abs(n)>=100)return[Math.round(n).toString(),""];const [a,b]=n.toFixed(1).split(".");return[a,"."+b]}
+function formatTemp(v){return numberOrNull(v)!==null?Number(v).toFixed(1):"--.-"}
+function dailyParts(v){let n=numberOrNull(v);if(n===null)return["--",""];if(settings.unit==="F"&&Math.abs(n)>=100)return[Math.round(n).toString(),""];const [a,b]=n.toFixed(1).split(".");return[a,"."+b]}
 function drawDaily(v,x,w,c){const [a,b]=dailyParts(v),aw=textWidth(a,2),bw=b?textWidth(b,1):0,g=b?1:0,total=aw+bw+g;if(total<=w){const xx=x+Math.floor((w-total)/2);outlineText(a,xx,52,2);ptext(a,xx,52,c,2);if(b){outlineText(b,xx+aw+g,57,1);ptext(b,xx+aw+g,57,c,1)}}else{const t=a+b,xx=x+Math.max(0,Math.floor((w-textWidth(t))/2));outlineText(t,xx,57);ptext(t,xx,57,c)}}
+function mod(n,d){return ((n%d)+d)%d}
+function windDxPercent(){return [0,-38,-71,-92,-100,-92,-71,-38,0,38,71,92,100,92,71,38][mod(Math.floor(((weather?.windDir||0)+11.25)/22.5),16)]}
 function weatherParticles(now){
   if(!weather)return;
   const rain=Math.max(weather.rain||0,weather.showers||0), snow=weather.snow||0;
   const wind=Math.max(weather.wind||0,(weather.gust||0)*.65);
-  const windDx=-Math.sin((Number(weather.windDir||weather.wind_direction_deg||0))*Math.PI/180);
+  const windDx=windDxPercent()/100;
   if(rain>0){
     const count=rain<.3?3:rain<1.5?5:7, cyc=rain<.3?3200:rain<1.5?2500:1800;
     for(let i=0;i<count;i++){
@@ -207,9 +233,9 @@ function weatherParticles(now){
   if(snow>0){
     const count=snow<.3?3:5,cyc=5200;
     for(let i=0;i<count;i++){
-      const phase=(now+i*911)%cyc,p=phase/cyc,y=p*70-3,flutter=Math.sin(p*Math.PI*4+i)*2;
-      const x=3+((i*23+11)%58)+flutter,side=(Math.floor(p*8+i)%8)<4?1:-1;
-      px(x,y,bright([125,138,145]));px(x,y-1,bright([92,110,125]));px(x-side,y,bright([52,72,96]));px(x+side,y,bright([52,72,96]));px(x,y+1,bright([52,72,96]));
+      const phase=(now+i*911)%cyc,p=phase/cyc,y=Math.floor(p*70)-3,wi=(Math.floor(p*8)+i)%8,drift=Math.floor(p*Math.floor(windDx*Math.min(220,Math.floor(wind*5.5)))/10);
+      const x=2+mod(1+((i*23+11)%58)+drift+SNOW_FLUTTER[wi],60),side=wi<4?1:-1;
+      px(x,y,bright([92,110,125]));px(x,y-1,bright([125,138,145]));px(x-side,y,bright([52,72,96]));px(x+side,y,bright([52,72,96]));px(x,y+1,bright([52,72,96]));
     }
     return;
   }
@@ -218,7 +244,8 @@ function weatherParticles(now){
     for(let i=0;i<count;i++){
       const phase=(now+i*1900)%interval;if(phase>=travel)continue;const p=phase/travel;
       const x=right?-3+p*70:66-p*70,y=18+(i*13)%28+LEAF_WAVE[(Math.floor(p*8)+i)%8],tip=right?1:-1;
-      px(x,y,bright([122,66,0]));px(x+tip,y+1,bright([105,88,0]));px(x,y+1,bright([82,34,0]));px(x-tip,y-1,bright([55,25,0]));
+      const frame=LEAF_FRAMES[LEAF_FRAME_SEQUENCE[(Math.floor(phase/625)+i*3)%8]];
+      frame.forEach(([dx,dy],j)=>px(x+dx*tip,y+dy,bright([[122,66,0],[105,88,0],[82,34,0],[55,25,0]][j])));
     }
   }
 }
@@ -228,103 +255,131 @@ function drawGround(now){
   updateGround(now);if(!ground.kind||ground.level<=0)return;
   if(ground.kind==="snow"){const bank=[0,1,0,0,1,1,0,1];for(let x=0;x<64;x++){const h=Math.min(21,ground.level+bank[Math.floor(x/4)%bank.length]);rect(x,64-h,1,h,bright([54,68,82]));px(x,64-h,bright([112,125,134]))}return}
   const y=64-ground.level,cols=[[0,96,156],[0,72,136],[0,54,114],[0,38,88]];for(let b=0;b<4;b++){const a=Math.floor(ground.level*b/4),z=Math.floor(ground.level*(b+1)/4);if(z>a)rect(0,y+a,64,z-a,cols[b])}rect(0,y,64,1,[0,166,214]);
-  if(ground.level>=6)for(let i=0;i<Math.min(7,2+Math.floor(ground.level/5));i++){const cyc=2600+i*370,p=(now+i*641)%cyc,r=p*Math.max(2,ground.level-2)/cyc;px(4+((i*17+9)%56),62-r,i%3?[40,176,224]:[68,224,255])}
+  for(let i=0;i<2;i++){const phase=(now+i*1900)%4400;if(phase>=2100)continue;const centre=[18,45][i]+Math.floor(windDxPercent()*phase/21000),radius=1+Math.floor(phase*10/2100);for(const side of[-1,1]){px(centre+side*radius,y,bright([0,105,132]));px(centre+side*radius-side,y,bright([0,105,132]))}if(radius>=4){px(centre-radius+2,y+1,bright([0,72,102]));px(centre+radius-2,y+1,bright([0,72,102]))}}
+  if(ground.level>=6)for(let i=0;i<Math.min(7,2+Math.floor(ground.level/5));i++){const cycle=2600+i*370,phase=(now+i*641)%cycle,rise=Math.floor(phase*Math.max(2,ground.level-2)/cycle),x=4+((i*17+9)%56)+UFO_BOB[(Math.floor(phase/300)+i)%8],by=62-rise,c=bright(i%3?[20,88,112]:[34,112,138]);px(x,by,c);if(i%3===0&&ground.level>=14)px(x+1,by-1,c)}
 }
+// Firmware sprite geometry and animation phases, with brighter browser palettes.
+function seed(n){return (Math.imul(Math.floor(n),1103515245)+12345)>>>0&0x7fffffff}
+function schedule(entity,now,base,span,salt=0){entity.next=now+base+seed(Math.floor(now/1000)+salt)%(span+1)}
 function drawFish(now){
-  if(ground.kind!=="rain"||ground.level<8){fish.active=false;fish.next=0;return}const surface=64-ground.level;if(!fish.next){fish.next=now+20000+rand(now)*20000;return}if(!fish.active&&now>=fish.next){fish.active=true;fish.start=now;fish.right=rand(now+3)>.5;fish.y=surface+2+Math.floor(rand(now+4)*Math.max(1,61-surface));fish.duration=7600+rand(now+5)*4000}
-  if(!fish.active)return;const e=now-fish.start;if(e>=fish.duration){fish.active=false;fish.next=now+20000+rand(now)*20000;return}const x=fish.right?-10+e*84/fish.duration:74-e*84/fish.duration,d=fish.right?1:-1,y=fish.y,c=bright([18,100,92]);for(let yy=0;yy<5;yy++)for(let xx=2+Math.abs(2-yy);xx<=8-Math.abs(2-yy);xx++)px(x+d*xx,y+yy,c);px(x+d*1,y+2,bright([8,58,54]));px(x+d*8,y+1,BLACK)
-}
-function drawLargeBirdPixels(points,x,y,right,colour){
-  for(const [dx,dy] of points){
-    const xx=x+(right?dx*2:(8-dx)*2), yy=y+dy*2;
-    rect(xx,yy,2,2,colour);
+  if(ground.kind!=="rain"||ground.level<8){fish.active=false;fish.next=0;return}
+  const minY=65-ground.level;
+  if(fish.active)fish.y=Math.max(fish.y,minY);
+  if(!fish.next){schedule(fish,now,20000,20000);return}
+  if(!fish.active){
+    if(now<fish.next)return;
+    const s=seed(now/1000),species=(s>>7)%FISH_WIDTHS.length,height=FISH_HEIGHTS[species];
+    Object.assign(fish,{active:true,start:now,right:!!(s&1),species,colour:(s>>11)%FISH_COLOURS.length,y:minY+(s>>3)%Math.max(1,65-height-minY),duration:[7600,9800,12400][species]+(s>>15)%1800});
   }
+  const e=now-fish.start;if(e>=fish.duration){fish.active=false;schedule(fish,now,20000,20000);return}
+  const w=FISH_WIDTHS[fish.species],h=FISH_HEIGHTS[fish.species],d=fish.right?1:-1,x=fish.right?-w+Math.floor(e*(64+w*2)/fish.duration):63+w-Math.floor(e*(64+w*2)/fish.duration),y=fish.y,m=Math.floor(h/2);
+  for(let dy=0;dy<h;dy++){const dist=Math.abs(m-dy);for(let dx=2+Math.floor(dist/2);dx<=w-1-dist;dx++)px(x+d*dx,y+dy,bright(FISH_COLOURS[fish.colour]))}
+  const shift=FISH_TAIL_SHIFT[Math.floor(e/375)%4],accent=bright(FISH_ACCENTS[fish.colour]);
+  for(let [dx,dy] of [[0,0],[1,1],[2,m],[1,h-2],[0,h-1]]){if(dx<2)dy=clamp(dy+shift,0,h-1);px(x+d*dx,y+dy,accent)}
+  const fy=shift>=0?h-1:h-2;px(x+d*Math.floor(w/2),y+fy,accent);if(fish.species>0)px(x+d*(Math.floor(w/2)+1),y+fy,accent);
+  px(x+d*(w-2),y+Math.max(1,m-1),BLACK);px(x+d*(w-3),y+m,bright([105,105,92]));
 }
-function drawBird(x,y,right,species,now){
-  const [body0,breast0,wing0,beak0]=BIRD_COLOURS[species%BIRD_COLOURS.length];
-  const body=bright(body0),breast=bright(breast0),wing=bright(wing0),beak=bright(beak0);
-  const wingFrame=BIRD_WING_SEQUENCE[Math.floor(now/250)%BIRD_WING_SEQUENCE.length];
-
-  drawLargeBirdPixels(BIRD_BODY,x,y,right,body);
-  drawLargeBirdPixels([[5,2],[6,2],[5,3],[5,4]],x,y,right,breast);
-  drawLargeBirdPixels(BIRD_WINGS[wingFrame],x,y,right,wing);
-
-  // Match the real matrix bird: two little feet below the body and a
-  // two-pixel beak projecting from the head. At browser scale these details
-  // need the same doubled pixels as the rest of the bird to remain visible.
+function drawLargeBirdPixels(points,x,y,right,c){for(const[dx,dy]of points)rect(x+(right?dx*2:(8-dx)*2),y+dy*2,2,2,c)}
+function drawBird(x,y,right,species,elapsed,peck=false){
+  const [body,breast,wing,beak]=BIRD_COLOURS[species].map(c=>bright(c));
+  drawLargeBirdPixels(peck?BIRD_PECK_BODY:BIRD_BODY,x,y,right,body);
+  drawLargeBirdPixels(peck?[[6,4],[7,4],[6,5],[7,5]]:[[5,2],[6,2],[5,3],[5,4]],x,y,right,breast);
+  drawLargeBirdPixels(BIRD_WING_FRAMES[BIRD_WING_SEQUENCE[Math.floor(elapsed/250)%4]],x,y,right,wing);
   drawLargeBirdPixels([[3,6],[5,6]],x,y,right,beak);
-  drawLargeBirdPixels([[7,1],[8,1]],x,y,right,beak);
-
-  const eyeX=x+(right?13:4);
-  px(eyeX,y+1,BLACK);
-  px(eyeX,y+2,BLACK);
+  drawLargeBirdPixels(peck?[[8,7]]:[[7,1],[8,1]],x,y,right,beak);
+  const ex=x+(peck?(right?14:2):(right?13:4)),ey=y+(peck?9:1);px(ex,ey,BLACK);px(ex,ey+1,BLACK);
 }
-function drawDuck(x,y,right,now){
-  const mirror=31,mapX=(dx,base=18)=>right?x+base+dx:x+mirror-base-dx;for(const[dx,dy]of DUCK_BODY)px(mapX(dx),y+dy,bright([96,68,24]));for(const[dx,dy]of DUCK_HEAD)px(mapX(dx),y+dy,bright([18,100,65]));for(const[dx,dy]of DUCK_WING)px(mapX(dx),y+dy,bright([60,42,18]));for(const[dx,dy]of DUCK_BILL)px(mapX(dx),y+dy,bright([175,105,12]));for(let i=0;i<3;i++){const base=[13,7,1][i],bob=((Math.floor(now/250)+i*2)%6===1)?-1:0;for(const[dx,dy]of DUCKLING){const xx=right?x+base+dx:x+mirror-base-dx;px(xx,y+4+dy+bob,bright([155,125,18]))}px(right?x+base+4:x+mirror-base-4,y+5+bob,bright([110,75,8]))}
+function drawDuck(x,y,right,e){
+  const map=dx=>right?x+dx:x+DUCK_FAMILY_WIDTH-1-dx;
+  for(const[points,ci]of [[DUCK_BODY,0],[DUCK_HEAD,1],[DUCK_WING,2],[DUCK_BILL,3],[[[4,7],[4,8],[3,8],[8,7],[8,8],[7,8]],3]])for(const[dx,dy]of points)px(map(18+dx),y+dy,bright(DUCK_COLOURS[ci]));
+  px(map(28),y+1,BLACK);
+  [13,7,1].forEach((base,i)=>{const bob=(Math.floor(e/250)+i*2)%6===1?-1:0;
+    for(const[dx,dy]of DUCKLING_BODY)px(map(base+dx),y+4+dy+bob,bright(DUCK_COLOURS[4]));
+    for(const[dx,dy]of DUCKLING_BILL)px(map(base+dx),y+4+dy+bob,bright(DUCK_COLOURS[5]));
+    px(map(base+1),y+8+bob,bright(DUCK_COLOURS[5]));px(map(base+3),y+4+bob,BLACK);
+  });
+}
+function creatureMotion(e,duration,right,turn){
+  if(!turn)return[Math.floor(e*82/duration),right,false];
+  const p=Math.floor(e*1000/duration);
+  const progress=p<300?Math.floor(p*35/300):p<450?35+Math.floor((p-300)*10/150):p<600?45:p<750?45-Math.floor((p-600)*10/150):Math.max(0,35-Math.floor((p-750)*35/250));
+  return[progress,p<525?right:!right,p>=450&&p<600];
 }
 function drawCreature(now){
-  if(!daylight()){creature.active=false;creature.next=0;return}if(!creature.next){creature.next=now+3000+rand(now)*5000;return}if(!creature.active&&now>=creature.next){creature.active=true;creature.start=now;creature.kind=rand(now+1)<.13?"duck":"bird";creature.right=rand(now+2)>.5;creature.species=Math.floor(rand(now+3)*BIRD_COLOURS.length);creature.duration=creature.kind==="duck"?13000:9000}
-  if(!creature.active)return;const e=now-creature.start;if(e>=creature.duration){creature.active=false;creature.next=now+10000+rand(now)*10000;return}const p=e*(creature.kind==="duck"?96:82)/creature.duration,x=creature.right?(creature.kind==="duck"?-32:-18)+p:64-p;if(creature.kind==="duck")drawDuck(x,8,creature.right,now);else{const hop=[0,0,-1,-2,-1,0,0,0][Math.floor(e/150)%8];drawBird(x,16-14+hop,creature.right,creature.species,now)}
+  if(!daylight()){creature.active=false;creature.next=0;return}
+  if(!creature.next){schedule(creature,now,3000,5000,911);return}
+  if(!creature.active){if(now<creature.next)return;
+    const s=seed(Math.floor(now/1000)+1237),duck=(s&7)===0,perches=[16,42,63].filter(p=>!ground.level||p<64-ground.level);
+    Object.assign(creature,{active:true,start:now,kind:duck?"duck":"bird",species:(s>>4)%BIRD_COLOURS.length,perch:duck?16:perches[(s>>7)%perches.length],right:!!(s&1),duration:duck?12000+(s>>11)%4001:7000+(s>>11)%5001,interact:!duck&&(s>>16)%6<2,interactionDone:false,interactionStart:0,turnaround:!duck&&((s>>19)&3)===0});
+  }
+  let age=now-creature.interactionStart;
+  const e=now-creature.start-(creature.interactionDone?clamp(age,0,900):0);
+  if(e>=creature.duration){creature.active=false;schedule(creature,now,10000,10000,911);return}
+  if(creature.kind==="duck"){const p=Math.floor(e*96/creature.duration);drawDuck(creature.right?-32+p:64-p,8,creature.right,e);return}
+  const[p,right,stopped]=creatureMotion(e,creature.duration,creature.right,creature.turnaround),x=creature.right?-18+p:64-p;
+  if(creature.interact&&!creature.interactionDone&&[16,42].includes(creature.perch)&&Math.abs(x+(right?16:0)-(2+localDate().getUTCSeconds()))<=2){creature.interactionDone=true;creature.interactionStart=now;age=0}
+  const peck=creature.interactionDone&&age>=0&&age<900&&(Math.floor(age/225)&1)===0;
+  drawBird(x,creature.perch-14+(stopped?0:[0,0,-1,-2,-1,0,0,0][Math.floor(e/150)%8]),right,creature.species,e,peck);
 }
 function drawUfo(now){
   if(!(daylight()||afterSunset())||abduction.active)return;
-  if(!ufo.next){ufo.next=now+(daylight()?30000:20000)+rand(now)*30000;return}
-  if(!ufo.active&&now>=ufo.next){
-    ufo.active=true;ufo.start=now;ufo.right=rand(now+2)>.5;
-    ufo.y=3+Math.floor(rand(now+3)*25);
-    ufo.colour=Math.floor(rand(now+4)*5);
-    ufo.duration=4500+rand(now+5)*5000
+  const day=daylight();
+  if(!ufo.next||(!ufo.active&&ufo.daylight!==day)){schedule(ufo,now,day?30000:20000,day?30000:20000,313);ufo.daylight=day;return}
+  if(!ufo.active){if(now<ufo.next)return;const s=seed(Math.floor(now/1000)+719),mode=(s>>3)%3,style=(s>>12)%UFO_WIDTHS.length;
+    Object.assign(ufo,{active:true,start:now,right:!!(s&1),y:3+(s>>5)%25,colour:(s>>10)%UFO_COLOURS.length,style,mode,duration:[3800,7200,11500][mode]+style*650,hoverX:17+(s>>13)%30});
   }
-  if(!ufo.active)return;
-  const e=now-ufo.start;
-  if(e>=ufo.duration){ufo.active=false;ufo.next=now+20000+rand(now)*30000;return}
-  const x=ufo.right?-10+e*84/ufo.duration:74-e*84/ufo.duration;
+  const e=now-ufo.start;if(e>=ufo.duration){ufo.active=false;schedule(ufo,now,day?30000:20000,day?30000:20000,313);ufo.daylight=day;return}
+  const st=ufo.style,w=UFO_WIDTHS[st],d=ufo.right?1:-1,start=ufo.right?-w:63+w,end=ufo.right?63+w:-w;
+  let x=start+d*Math.floor(e*(64+w*2)/ufo.duration);
+  if(ufo.mode===2)x=e<3000?start+d*Math.floor(Math.abs(ufo.hoverX-start)*e/3000):e<ufo.duration-3000?ufo.hoverX:ufo.hoverX+d*Math.floor(Math.abs(end-ufo.hoverX)*(e-ufo.duration+3000)/3000);
   const y=ufo.y+UFO_BOB[Math.floor(e/300)%8];
-  const cols=[[[35,110,105],[90,35,115]],[[110,42,32],[105,95,20]],[[42,72,120],[110,40,82]],[[78,105,28],[25,92,110]],[[112,58,18],[25,105,120]]][ufo.colour];
-  rect(x+2,y+2,9,2,bright(cols[0]));
-  rect(x,y+4,13,2,bright(cols[0]));
-  rect(x+4,y,5,2,bright([90,90,105]));
-  // Animated chasing lamps make the craft look alive even at slow travel speed.
-  const phase=Math.floor(e/180)%4, lamps=[1,4,7,10];
-  for(let i=0;i<lamps.length;i++){
-    const on=i===phase;
-    px(x+lamps[i],y+6,on?[255,245,170]:bright(cols[1],1.3));
-  }
+  for(const[dx,dy]of UFO_DOMES[st])px(x+dx,y+dy,bright([90,90,105]));
+  for(const[a,b,dy]of UFO_ROWS[st])for(let dx=a;dx<=b;dx++)px(x+dx,y+dy,bright(UFO_COLOURS[ufo.colour][0]));
+  UFO_LIGHTS[st].forEach((dx,i)=>px(x+dx,y+UFO_LIGHT_Y[st],bright((i+Math.floor(e/375))%3===0?(day?UFO_DAY_LIGHTS[ufo.colour]:UFO_COLOURS[ufo.colour][1]):UFO_DIM_LIGHTS[ufo.colour])));
+  if(ufo.mode===2&&e>=3000&&e<ufo.duration-3000&&Math.floor(e/700)%2===0){px(x+Math.floor(w/2),y+UFO_BEAM_Y[st],bright([24,38,42]));px(x+Math.floor(w/2),y+UFO_BEAM_Y[st]+1,bright([24,38,42]))}
 }
 function drawStars(now){
-  if(!afterSunset())return;for(let i=0;i<16;i++){const seed=Math.floor(now/(23000+i*3700))+i*101,x=2+Math.floor(rand(seed)*60),y=1+Math.floor(rand(seed+1)*59),v=35+Math.floor(rand(seed+2)*65);px(x,y,bright([v,v,Math.min(120,v+18)],2.35))}
-  if(!star.next){star.next=now+300000+rand(now)*300000;return}if(!star.active&&now>=star.next){star.active=true;star.start=now;star.right=rand(now)>.5;star.y=4+Math.floor(rand(now+1)*32)}if(star.active){const e=now-star.start;if(e>=2000){star.active=false;star.next=now+300000+rand(now)*300000}else{const travel=e*70/2000,x=star.right?-3+travel:66-travel,y=star.y+travel/12,d=star.right?1:-1;px(x,y,[255,255,255]);px(x-d,y-1,[180,195,225]);px(x-2*d,y-2,[95,115,160])}}
+  if(!afterSunset()){star.active=false;star.next=0;return}
+  for(let i=0;i<16;i++){
+    const s=seed(Math.floor(now/(23000+i*3700))+i*101),x=2+s%60,y=1+(s>>7)%59,period=2600+i*310,phase=(now+i*557)%period,triangle=phase<Math.floor(period/2)?phase:period-phase,b=28+Math.floor(triangle*72/Math.floor(period/2));
+    px(x,y,bright([b,b,b+18]));if(i%5===0&&b>=84){const a=Math.floor(b/3);for(const[dx,dy]of [[-1,0],[1,0],[0,-1],[0,1]])px(x+dx,y+dy,bright([a,a,a+10]))}
+  }
+  if(!star.next){schedule(star,now,300000,300000,97);return}
+  if(!star.active){if(now<star.next)return;const s=seed(now/1000);Object.assign(star,{active:true,start:now,right:!!(s&1),y:4+(s>>3)%32})}
+  const e=now-star.start;if(e>=2000){star.active=false;schedule(star,now,300000,300000,97);return}
+  const travel=Math.floor(e*70/2000),x=star.right?-3+travel:66-travel,d=star.right?1:-1,y=star.y+Math.floor(travel/12);
+  [[110,110,120],[65,70,82],[32,38,50]].forEach((c,i)=>px(x-d*i,y-i,bright(c)));
 }
-function triggerAbduction(){
-  const now=performance.now();
-  abduction.active=true;
-  abduction.start=now;
-  // Put ordinary UFO traffic on hold while the large abduction sequence runs.
-  ufo.active=false;
-  ufo.next=now+18000;
+function triggerAbduction(now=performance.now(),manual=true){
+  const d=localDate();Object.assign(abduction,{active:true,start:now,manual,colour:(d.getUTCDate()+d.getUTCHours()+d.getUTCMinutes())%ABDUCTION_COLOURS.length});
+  ufo.active=false;ufo.next=0;
 }
 function updateAbduction(now){
-  if(abduction.active){
-    if(now-abduction.start>=10500)abduction.active=false;
-    return;
-  }
-  if(!afterSunset()){abduction.active=false;return}const d=localDate(),key=[d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate(),d.getUTCHours(),d.getUTCMinutes()].join("-");if([0,30].includes(d.getUTCMinutes())&&d.getUTCSeconds()<2&&abduction.lastKey!==key){abduction.active=true;abduction.start=now;abduction.lastKey=key}if(abduction.active&&now-abduction.start>=10500)abduction.active=false
+  if(abduction.active){if(now-abduction.start>=10500||(!abduction.manual&&!afterSunset()))abduction.active=false;return}
+  if(!afterSunset())return;
+  const d=localDate(),key=[d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate(),d.getUTCHours(),d.getUTCMinutes()].join("-");
+  if([0,30].includes(d.getUTCMinutes())&&d.getUTCSeconds()<2&&abduction.lastKey!==key){triggerAbduction(now,false);abduction.lastKey=key}
 }
-function abductionTemp(now){if(!abduction.active)return[0,1,true];const e=now-abduction.start;if(e<3200)return[0,1,true];if(e<5000){const p=e-3200;return[-p*13/1800,Math.max(.25,1-p/2400),true]}if(e<6000)return[-13,0,false];if(e<7800){const p=e-6000;return[-13+p*13/1800,Math.min(1,.25+p/2400),true]}return[0,1,true]}
+function abductionTemp(now){if(!abduction.active)return[0,1,true];const e=now-abduction.start;if(e<3200)return[0,1,true];if(e<5000){const p=e-3200;return[-Math.floor(p*13/1800),Math.max(.25,1-p/2400),true]}if(e<6000)return[-13,0,false];if(e<7800){const p=e-6000;return[-13+Math.floor(p*13/1800),Math.min(1,.25+p/2400),true]}return[0,1,true]}
 function drawAbduction(now){
-  if(!abduction.active)return;const e=now-abduction.start,x=e<1500?-23+45*e/1500:e<9000?22:22+48*(e-9000)/1500,y=17+UFO_BOB[Math.floor(e/260)%8];if(e>=1600&&e<8800){const phase=Math.floor(e/250)%4;for(let yy=22;yy<42;yy++){const half=Math.min(10,Math.floor((yy-21)/2));if((yy+phase)%3===0)for(let xx=31-half;xx<=32+half;xx++)if((xx+yy)%2===0)px(xx,yy,bright([55,42,10],2.6))}}rect(x+6,y,11,2,bright([92,96,112]));rect(x+2,y+2,19,2,bright([42,112,105]));rect(x,y+4,23,2,bright([42,112,105]));for(const dx of[2,6,11,16,20])px(x+dx,y+6,bright([150,112,12]))
+  if(!abduction.active)return;
+  const e=now-abduction.start,x=e<1500?-23+Math.floor(45*e/1500):e<9000?22:22+Math.floor(48*(e-9000)/1500),y=17+UFO_BOB[Math.floor(e/260)%8],ci=abduction.colour,[dome,body,lights]=ABDUCTION_COLOURS[ci];
+  if(e>=1600&&e<8800){const phase=Math.floor(e/250)%4,c=bright((afterSunset()?ABDUCTION_BEAM_SHADES:ABDUCTION_DAY_BEAM_SHADES)[ci][phase]);for(let yy=22;yy<42;yy++){const half=Math.min(10,Math.floor((yy-21)/2));if((yy+phase)%3===0)for(let xx=31-half;xx<32+half;xx++)if((xx+yy)%2===0)px(xx,yy,c)}}
+  rect(x+6,y,11,2,bright(dome));rect(x+2,y+2,19,2,bright(body));rect(x,y+4,23,2,bright(body));
+  [2,6,11,16,20].forEach((dx,i)=>px(x+dx,y+6,bright(i===Math.floor(e/250)%5?(afterSunset()?lights:ABDUCTION_DAY_LIGHTS[ci]):ABDUCTION_DIM_LIGHTS[ci])));
 }
+
 function warningEdges(now){if(!weather)return;if(weather.isCold){rect(0,62,8,2,[22,120,238]);rect(0,56,2,8,[22,120,238]);rect(56,62,8,2,[22,120,238]);rect(62,56,2,8,[22,120,238])}}
 function draw(now){
-  clear();if(!weather){ptext("--:--",2,3,[85,85,85],2);divider(16,new Date().getSeconds(),true);ptext("--.-",10,24,[85,85,85],2);return}
+  clear();if(!weather){const sec=localDate().getUTCSeconds();ptext(clockText(),2,3,[231,240,241],2);ptext("--%",42,3,[0,197,213],2);divider(16,sec,true);ptext("--.-",10,24,[231,240,241],2);divider(42,sec,false);ptext("MIN",4,45,[147,162,166]);ptext("MAX",26,45,[147,162,166]);drawDaily(null,4,20,[180,180,180]);drawDaily(null,25,23,[180,180,180]);return}
   updateAbduction(now);drawStars(now);weatherParticles(now);drawGround(now);
-  const d=localDate(),sec=d.getUTCSeconds(),ct=clockText(),hum=`${Math.round(weather.humidity)}%`,tt=formatTemp(weather.temp);
+  const d=localDate(),sec=d.getUTCSeconds(),ct=clockText(),hum=weather.humidity===null?"--%":`${Math.round(weather.humidity)}%`,tt=formatTemp(weather.temp);
   const clockPulse=watchChange("clock",ct,now);
-  const humidityPulse=watchChange("humidity",Math.round(weather.humidity),now);
+  const humidityPulse=watchChange("humidity",hum,now);
   const tempPulse=watchChange("temp",tt,now);
-  const minPulse=watchChange("min",formatTemp(weather.min),now);
-  const maxPulse=watchChange("max",formatTemp(weather.max),now);
-  const pressurePulse=watchChange("pressure",weather.trend,now);
+  const minPulse=watchChange("min",dailyParts(weather.min).join(""),now);
+  const maxPulse=watchChange("max",dailyParts(weather.max).join(""),now);
+  const pressurePulse=watchChange("pressure",[95,96,99].includes(weather.code)?"storm":weather.trend,now);
   ptext(ct,2,3,pulseColour([231,240,241],clockPulse,now),2);
   ptext(hum,62-textWidth(hum,2),3,pulseColour([0,197,213],humidityPulse,now),2);
   divider(16,sec,true);
@@ -347,42 +402,102 @@ function draw(now){
   drawDaily(weather.min,4,20,pulseColour(tempColour(weather.min),minPulse,now));
   drawDaily(weather.max,25,23,pulseColour(tempColour(weather.max),maxPulse,now));
   const arr=ARROWS[weather.trend]||ARROWS.steady;
-  bitmap(arr,52,50,pulseColour(pressureColour(weather.trend),pressurePulse,now),2);
+  if([95,96,99].includes(weather.code)){
+    const triangle=(x,y,c)=>{for(let row=0;row<9;row++){const half=Math.floor(row/2);rect(x+4-half,y+row,half*2+1,1,c)}rect(x+4,y+3,1,3,BLACK);px(x+4,y+7,BLACK)};
+    for(const[dx,dy]of [[-1,0],[1,0],[0,-1],[0,1]])triangle(52+dx,50+dy,BLACK);
+    triangle(52,50,pulseColour(bright([120,65,0]),1-Math.abs((now%1800)/900-1)));
+  }else{for(const[dx,dy]of [[-1,0],[1,0],[0,-1],[0,1]])bitmap(arr,52+dx,50+dy,BLACK,2);bitmap(arr,52,50,pulseColour(pressureColour(weather.trend),pressurePulse),2)}
   drawFish(now);drawCreature(now);drawUfo(now);drawAbduction(now);warningEdges(now)
 }
 let lastFrame=0;
-function loop(ts){if(ts-lastFrame>=125){draw(ts);lastFrame=ts}requestAnimationFrame(loop)}
+function loop(ts){requestAnimationFrame(loop);if(ts-lastFrame>=125){draw(ts);lastFrame=ts}}
 
-async function fetchWeather(){
-  const tempUnit=settings.unit==="F"?"fahrenheit":"celsius";
-  const current="temperature_2m,relative_humidity_2m,pressure_msl,precipitation,rain,showers,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m";
-  const hourly="pressure_msl,precipitation_probability";
-  const daily="temperature_2m_min,temperature_2m_max,sunrise,sunset";
-  const url=`https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(settings.lat)}&longitude=${encodeURIComponent(settings.lon)}&current=${current}&hourly=${hourly}&daily=${daily}&temperature_unit=${tempUnit}&forecast_days=1&past_hours=3&timezone=auto`;
-  setStatus("Fetching Open-Meteo…");
-  const r=await fetch(url);if(!r.ok)throw new Error(`Open-Meteo HTTP ${r.status}`);const p=await r.json(),c=p.current||{},h=p.hourly||{},day=p.daily||{};
-  const target=(c.time||"").slice(0,13)+":00",i=(h.time||[]).indexOf(target),old=i-3,pc=(i>=0&&old>=0&&h.pressure_msl)?Number(h.pressure_msl[i])-Number(h.pressure_msl[old]):0;
-  const trend=pc>=2?"rising_fast":pc>=.5?"rising_slow":pc<=-2?"falling_fast":pc<=-.5?"falling_slow":"steady";
-  const temp=Number(c.temperature_2m);
-  weather={temp,humidity:Number(c.relative_humidity_2m),min:Number((day.temperature_2m_min||[])[0]),max:Number((day.temperature_2m_max||[])[0]),pressure:Number(c.pressure_msl),trend,
-    rain:Number(c.rain||0),showers:Number(c.showers||0),snow:Number(c.snowfall||0),wind:Number(c.wind_speed_10m||0),gust:Number(c.wind_gusts_10m||0),windDir:Number(c.wind_direction_10m||0),code:Number(c.weather_code||0),
-    sunrise:(day.sunrise||[])[0],sunset:(day.sunset||[])[0],isCold:temp<=(settings.unit==="F"?37.4:3)};
-  utcOffset=Number(p.utc_offset_seconds||0);timezone=p.timezone||"UTC";lastFetch=Date.now();demo=false;setStatus(`Live: ${timezone} • ${formatTemp(temp)}°${settings.unit}`,"ok")
+let requestSerial=0, pendingController=null, lastAttempt=0, rainPreview=-1, liveWeather=null;
+function numberOrNull(v){return v===null||v===undefined||v===""?null:Number.isFinite(Number(v))?Number(v):null}
+function pressureTrend(change){return change===null?"unknown":change>=2?"rising_fast":change>=.5?"rising_slow":change<=-2?"falling_fast":change<=-.5?"falling_slow":"steady"}
+function parseWeather(p){
+  const c=p.current||{},h=p.hourly||{},day=p.daily||{};
+  if(!c.time)throw new Error("Open-Meteo response has no current conditions.");
+  const i=(h.time||[]).indexOf(c.time.slice(0,13)+":00"),values=h.pressure_msl||[],latest=numberOrNull(values[i]),old=numberOrNull(values[i-3]);
+  const change=i>=3&&latest!==null&&old!==null?Math.round((latest-old)*10)/10:null,temp=numberOrNull(c.temperature_2m);
+  return {temp,humidity:numberOrNull(c.relative_humidity_2m),min:numberOrNull(day.temperature_2m_min?.[0]),max:numberOrNull(day.temperature_2m_max?.[0]),pressure:numberOrNull(c.pressure_msl),trend:pressureTrend(change),pressureChange:change,
+    rain:numberOrNull(c.rain)||0,showers:numberOrNull(c.showers)||0,snow:numberOrNull(c.snowfall)||0,wind:numberOrNull(c.wind_speed_10m)||0,gust:numberOrNull(c.wind_gusts_10m)||0,windDir:numberOrNull(c.wind_direction_10m)||0,code:numberOrNull(c.weather_code),
+    sunrise:day.sunrise?.[0],sunset:day.sunset?.[0],isDay:numberOrNull(c.is_day),isCold:temp!==null&&temp<=(settings.unit==="F"?37.4:3),forecastTime:c.time};
 }
+async function fetchWeather(){
+  const serial=++requestSerial;
+  pendingController?.abort();const controller=new AbortController();pendingController=controller;
+  const deadline=setTimeout(()=>controller.abort(),15000);lastAttempt=Date.now();
+  const params=new URLSearchParams({latitude:String(settings.lat),longitude:String(settings.lon),current:"temperature_2m,relative_humidity_2m,pressure_msl,precipitation,rain,showers,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,is_day",hourly:"pressure_msl,precipitation_probability",daily:"temperature_2m_min,temperature_2m_max,sunrise,sunset",temperature_unit:settings.unit==="F"?"fahrenheit":"celsius",wind_speed_unit:"kmh",precipitation_unit:"mm",forecast_days:"1",past_hours:"3",timezone:"auto"});
+  setStatus("Fetching Open-Meteo…");
+  try{
+    const r=await fetch(`https://api.open-meteo.com/v1/forecast?${params}`,{signal:controller.signal});
+    if(!r.ok)throw new Error(`Open-Meteo HTTP ${r.status}`);
+    const p=await r.json();if(serial!==requestSerial)return;
+    const next=parseWeather(p);liveWeather=next;weather={...next};utcOffset=numberOrNull(p.utc_offset_seconds)||0;timezone=p.timezone||"UTC";demo=false;
+    if(rainPreview>=0)applyRainPreview(false);
+    else setStatus(`Live: ${timezone} • ${formatTemp(weather.temp)}°${settings.unit}`,"ok");
+  }catch(e){if(serial!==requestSerial)return;throw new Error(e.name==="AbortError"?"Weather request timed out. Try again or use Demo weather.":e.message||String(e))}
+  finally{clearTimeout(deadline);if(serial===requestSerial)pendingController=null}
+}
+function cancelFetch(){requestSerial++;pendingController?.abort();pendingController=null}
 function setDemo(){
-  const f=settings.unit==="F",conv=c=>f?c*9/5+32:c;utcOffset=0;timezone="Demo";
-  weather={temp:conv(20.2),humidity:81,min:conv(18),max:conv(31.2),pressure:1022.3,trend:"falling_slow",rain:.1,showers:0,snow:0,wind:16,gust:27,windDir:230,code:3,isCold:false,
-    sunrise:"2026-09-13T06:30",sunset:"2026-09-13T19:20"};demo=true;setStatus("Demo weather running.","ok")
+  cancelFetch();rainPreview=-1;$("rainBtn").textContent="Preview rain: light";
+  const conv=c=>settings.unit==="F"?c*9/5+32:c;
+  timezone="Europe/London";
+  utcOffset=timezoneOffset(timezone);demo=true;
+  liveWeather={temp:conv(20.2),humidity:81,min:conv(18),max:conv(31.2),pressure:1022.3,trend:"falling_slow",pressureChange:-.8,rain:.1,showers:0,snow:0,wind:16,gust:27,windDir:230,code:3,isCold:false,sunrise:"2000-01-01T06:30",sunset:"2000-01-01T19:20",isDay:1};
+  weather={...liveWeather};ground={kind:null,level:0,last:performance.now()};setStatus("Demo weather • London time","ok");
+}
+function timezoneOffset(zone){try{const parts=new Intl.DateTimeFormat("en-GB",{timeZone:zone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).formatToParts(new Date());const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));return Math.round((Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second)-Math.floor(Date.now()/1000)*1000)/1000)}catch{return utcOffset}}
+const RAIN_PREVIEWS=[{label:"Light rain",rain:.1},{label:"Moderate rain",rain:.8},{label:"Heavy rain",rain:2},{label:"Dry / drain",rain:0}];
+function applyRainPreview(jump=true){
+  const p=RAIN_PREVIEWS[rainPreview];weather={...liveWeather,rain:p.rain,showers:0,snow:0};
+  if(jump&&p.rain>0){const[k,level]=targetGround();ground={kind:k,level,last:performance.now()};fish.active=false;fish.next=0}
+  $("rainBtn").textContent=rainPreview===3?"End rain preview":`Preview rain: ${["moderate","heavy","dry"][rainPreview]}`;
+  setStatus(`${p.label} preview • ${p.rain>0?"target water depth shown immediately":"water drains one row per minute"} • ${timezone}`,"ok");
+}
+function previewRain(){
+  if(!weather)setDemo();
+  rainPreview++;
+  if(rainPreview>=RAIN_PREVIEWS.length){rainPreview=-1;weather={...liveWeather};$("rainBtn").textContent="Preview rain: light";setStatus(`${demo?"Demo":"Live"} weather restored • ${timezone}`,"ok");return}
+  applyRainPreview();
 }
 function setStatus(t,kind=""){const e=$("status");e.textContent=t;e.className="status "+kind}
-function save(){localStorage.setItem("i75-browser-emulator",JSON.stringify(settings))}
-function load(){try{Object.assign(settings,JSON.parse(localStorage.getItem("i75-browser-emulator")||"{}"))}catch{}if(!["auto","day","night"].includes(settings.scene))settings.scene="auto";$("lat").value=settings.lat;$("lon").value=settings.lon;$("unit").value=settings.unit;$("clock").value=String(settings.clock);$("scene").value=settings.scene}
-function readSettings(){settings.lat=Number($("lat").value);settings.lon=Number($("lon").value);settings.unit=$("unit").value;settings.clock=Number($("clock").value);settings.scene=$("scene").value;if(!Number.isFinite(settings.lat)||settings.lat<-90||settings.lat>90)throw new Error("Latitude must be between -90 and 90.");if(!Number.isFinite(settings.lon)||settings.lon<-180||settings.lon>180)throw new Error("Longitude must be between -180 and 180.");save()}
-async function start(){try{readSettings();ground={kind:null,level:0,last:performance.now()};await fetchWeather()}catch(e){setStatus(e.message||String(e),"err")}}
+function save(){try{localStorage.setItem("i75-browser-emulator",JSON.stringify(settings))}catch{/* Storage can be disabled for local files; the display still works. */}}
+function load(){
+  try{const s=JSON.parse(localStorage.getItem("i75-browser-emulator")||"{}");if(typeof s.lat==="number"&&Math.abs(s.lat)<=90)settings.lat=s.lat;if(typeof s.lon==="number"&&Math.abs(s.lon)<=180)settings.lon=s.lon;if(["C","F"].includes(s.unit))settings.unit=s.unit;if([12,24].includes(s.clock))settings.clock=s.clock;if(["auto","day","night"].includes(s.scene))settings.scene=s.scene}catch{}
+  $("lat").value=settings.lat;$("lon").value=settings.lon;$("unit").value=settings.unit;$("clock").value=String(settings.clock);$("scene").value=settings.scene;
+}
+function readSettings(){
+  const lat=$("lat").value.trim(),lon=$("lon").value.trim(),next={lat:Number(lat),lon:Number(lon),unit:$("unit").value,clock:Number($("clock").value),scene:$("scene").value};
+  if(!lat||!Number.isFinite(next.lat)||Math.abs(next.lat)>90)throw new Error("Latitude must be between -90 and 90.");
+  if(!lon||!Number.isFinite(next.lon)||Math.abs(next.lon)>180)throw new Error("Longitude must be between -180 and 180.");
+  if(!["C","F"].includes(next.unit)||![12,24].includes(next.clock)||!["auto","day","night"].includes(next.scene))throw new Error("Invalid display setting.");
+  const moved=settings.lat!==next.lat||settings.lon!==next.lon;
+  if(moved){weather=null;liveWeather=null;ground={kind:null,level:0,last:performance.now()};creature.next=ufo.next=star.next=0;creature.active=ufo.active=star.active=abduction.active=false;rainPreview=-1;$("rainBtn").textContent="Preview rain: light";timezone="UTC";utcOffset=0}
+  else if(settings.unit!==next.unit){const convert=v=>v===null?v:next.unit==="F"?v*9/5+32:(v-32)*5/9;for(const w of new Set([weather,liveWeather]))if(w)for(const k of["temp","min","max"])w[k]=convert(w[k])}
+  settings=next;save();
+}
+async function start(){try{readSettings();demo=false;await fetchWeather()}catch(e){setStatus(`${e.message}${weather?" Keeping the last weather.":""}`,"err")}}
+let searchSerial=0;
 async function searchPlace(){
-  const q=$("place").value.trim();if(q.length<2)return;const box=$("results");box.innerHTML="";try{$("searchBtn").disabled=true;const r=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`);if(!r.ok)throw new Error(`Geocoding HTTP ${r.status}`);const p=await r.json(),res=p.results||[];if(!res.length){box.innerHTML='<div class="small">No matches found.</div>';return}for(const x of res){const d=document.createElement("div");d.className="result";d.textContent=[x.name,x.admin1,x.country].filter(Boolean).join(", ");d.onclick=()=>{$("lat").value=x.latitude;$("lon").value=x.longitude;$("place").value=d.textContent;box.innerHTML="";};box.appendChild(d)}}catch(e){setStatus(e.message||String(e),"err")}finally{$("searchBtn").disabled=false}}
-$("startBtn").onclick=start;$("demoBtn").onclick=()=>{try{readSettings();setDemo()}catch(e){setStatus(e.message||String(e),"err")}};$("abductBtn").onclick=()=>{triggerAbduction();setStatus("Abduction triggered.","ok")};$("scene").onchange=()=>{settings.scene=$("scene").value;save();const label=settings.scene==="day"?"Daytime preview":settings.scene==="night"?"Night-time preview":"Automatic day/night";setStatus(`${label}${weather?` • ${timezone}`:""}`,"ok")};$("searchBtn").onclick=searchPlace;$("place").addEventListener("keydown",e=>{if(e.key==="Enter")searchPlace()});
+  const q=$("place").value.trim();if(q.length<2){setStatus("Enter at least two letters to find a place.");return}
+  const serial=++searchSerial,box=$("results");box.replaceChildren();$("searchBtn").disabled=true;
+  const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(),15000);
+  try{const r=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`,{signal:controller.signal});if(!r.ok)throw new Error(`Geocoding HTTP ${r.status}`);const p=await r.json();if(serial!==searchSerial)return;
+    const res=p.results||[];if(!res.length){box.textContent="No matches found.";return}
+    for(const x of res){const button=document.createElement("button");button.type="button";button.className="result";button.textContent=[x.name,x.admin1,x.country].filter(Boolean).join(", ");button.onclick=()=>{$("lat").value=x.latitude;$("lon").value=x.longitude;$("place").value=button.textContent;box.replaceChildren();start()};box.appendChild(button)}
+  }catch(e){if(serial===searchSerial)setStatus(e.name==="AbortError"?"Place search timed out. Try again.":e.message,"err")}
+  finally{clearTimeout(deadline);if(serial===searchSerial)$("searchBtn").disabled=false}
+}
+$("startBtn").onclick=start;
+$("demoBtn").onclick=()=>{try{readSettings();setDemo()}catch(e){setStatus(e.message,"err")}};
+$("rainBtn").onclick=previewRain;
+$("abductBtn").onclick=()=>{if(!weather)setDemo();triggerAbduction();setStatus("Abduction triggered.","ok")};
+$("scene").onchange=()=>{settings.scene=$("scene").value;save();setStatus(`${settings.scene==="day"?"Daytime preview":settings.scene==="night"?"Night-time preview":"Automatic day/night"} • ${timezone}`,"ok")};
+$("searchBtn").onclick=searchPlace;$("place").addEventListener("keydown",e=>{if(e.key==="Enter")searchPlace()});
 load();requestAnimationFrame(loop);setTimeout(start,100);
-setInterval(()=>{if(weather&&!demo&&Date.now()-lastFetch>=600000)fetchWeather().catch(e=>setStatus(`Refresh failed; keeping last weather: ${e.message}`,"err"))},30000);
+setInterval(()=>{if(!demo&&!pendingController&&Date.now()-lastAttempt>=600000)fetchWeather().catch(e=>setStatus(`${e.message}${weather?" Keeping the last weather.":""}`,"err"))},30000);
 </script></body>
 </html>
