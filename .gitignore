@@ -1,0 +1,7 @@
+# Local Wi-Fi credentials - never commit these.
+secrets.py
+
+# Common local/editor files
+.DS_Store
+__pycache__/
+*.pyc
