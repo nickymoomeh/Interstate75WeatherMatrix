@@ -16,6 +16,8 @@ import gc
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
 from config import (
+    TEMPERATURE_UNIT,
+    CLOCK_FORMAT,
     WEATHER_REFRESH_SECONDS,
     TARGET_FRAME_MS,
     NIGHT_DIM_FACTOR,
@@ -52,6 +54,16 @@ STORM_PULSE_PERIOD_MS = 1800
 LIGHTNING_PULSE_PERIOD_MS = 2400
 ACCUMULATION_STEP_MS = 30000
 ACCUMULATION_DRAIN_MS = 60000
+
+DISPLAY_TEMPERATURE_UNIT = str(TEMPERATURE_UNIT).upper()
+if DISPLAY_TEMPERATURE_UNIT not in ("C", "F"):
+    raise ValueError('TEMPERATURE_UNIT must be "C" or "F"')
+try:
+    DISPLAY_CLOCK_FORMAT = int(CLOCK_FORMAT)
+except (TypeError, ValueError):
+    raise ValueError("CLOCK_FORMAT must be 12 or 24")
+if DISPLAY_CLOCK_FORMAT not in (12, 24):
+    raise ValueError("CLOCK_FORMAT must be 12 or 24")
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +318,10 @@ def pressure_trend_rgb(trend):
 def temperature_rgb(value):
     try:
         temp = float(value)
+        # Keep the existing colour bands physically identical in Fahrenheit
+        # mode by converting only for colour classification.
+        if DISPLAY_TEMPERATURE_UNIT == "F":
+            temp = (temp - 32.0) * 5.0 / 9.0
     except Exception:
         return (85, 85, 85)
 
@@ -355,6 +371,7 @@ FONT = {
     "%": ["101", "001", "010", "100", "101"],
     "A": ["010", "101", "111", "101", "101"],
     "C": ["111", "100", "100", "100", "111"],
+    "F": ["111", "100", "110", "100", "100"],
     "H": ["101", "101", "111", "101", "101"],
     "I": ["1", "1", "1", "1", "1"],
     "M": ["101", "111", "111", "101", "101"],
@@ -501,7 +518,11 @@ def update_local_time_cache(now_seconds=None):
         LOCAL_TIME_CACHE["epoch_second"] = epoch_second
         LOCAL_TIME_CACHE["parts"] = local
         if previous_epoch is None or minute != previous_local[4] or hour != previous_local[3]:
-            LOCAL_TIME_CACHE["clock_text"] = "{:02d}:{:02d}".format(hour, minute)
+            if DISPLAY_CLOCK_FORMAT == 12:
+                display_hour = hour % 12 or 12
+                LOCAL_TIME_CACHE["clock_text"] = "{}:{:02d}".format(display_hour, minute)
+            else:
+                LOCAL_TIME_CACHE["clock_text"] = "{:02d}:{:02d}".format(hour, minute)
         # Night dimming deliberately remains a display preference rather than
         # astronomical night: 20:30 to 06:59 in the configured local timezone.
         LOCAL_TIME_CACHE["night"] = hour > 20 or (hour == 20 and minute >= 30) or hour < 7
@@ -574,17 +595,26 @@ def is_daylight(data):
 # Demo data and formatting
 # ---------------------------------------------------------------------------
 
+def celsius_to_display_temperature(value):
+    """Convert demo-only Celsius values to the configured display unit."""
+    if DISPLAY_TEMPERATURE_UNIT == "F":
+        return value * 9.0 / 5.0 + 32.0
+    return value
+
+
 def get_demo_weather():
-    demo_temps = [-2.4, 2.5, 8.0, 13.3, 18.5, 25.0, 28.0, 31.0]
-    demo_step = int(time.time() // DEMO_REFRESH_SECONDS) % len(demo_temps)
-    temp = demo_temps[demo_step]
+    demo_temps_c = [-2.4, 2.5, 8.0, 13.3, 18.5, 25.0, 28.0, 31.0]
+    demo_step = int(time.time() // DEMO_REFRESH_SECONDS) % len(demo_temps_c)
+    temp_c = demo_temps_c[demo_step]
+    temp = celsius_to_display_temperature(temp_c)
     trends = ["rising_fast", "rising_slow", "steady", "falling_slow", "falling_fast"]
     return {
         "temperature_c": temp,
+        "temperature_unit": DISPLAY_TEMPERATURE_UNIT,
         "humidity": 43 + demo_step,
-        "min_temperature_c": -2.4,
-        "max_temperature_c": 31.0,
-        "is_cold": temp <= 3,
+        "min_temperature_c": celsius_to_display_temperature(-2.4),
+        "max_temperature_c": celsius_to_display_temperature(31.0),
+        "is_cold": temp_c <= 3,
         "lightning_strikes_last_hour": 0,
         "lightning_strikes_last_5_min": 0,
         "pressure_trend": trends[demo_step % len(trends)],
@@ -610,7 +640,12 @@ def format_humidity(value):
 
 def format_daily_temperature_parts(value):
     try:
-        whole, fraction = "{:.1f}".format(float(value)).split(".")
+        numeric = float(value)
+        # Three-digit Fahrenheit values are common enough to plan for. Dropping
+        # the decimal keeps MIN/MAX legible in their narrow bottom-row areas.
+        if DISPLAY_TEMPERATURE_UNIT == "F" and abs(numeric) >= 100:
+            return "{:.0f}".format(numeric), ""
+        whole, fraction = "{:.1f}".format(numeric).split(".")
         return whole, "." + fraction
     except Exception:
         return "--", ""
@@ -1436,12 +1471,12 @@ def draw_weather(data, now_ms, pulses):
     if temp_visible:
         graphics.set_pen(BLACK)
         graphics.rectangle(degree_x - 1, temp_y - 1, 4, 4)
-        outline_pixel_text("C", degree_x + 4, temp_y + 2, scale=1)
+        outline_pixel_text(DISPLAY_TEMPERATURE_UNIT, degree_x + 4, temp_y + 2, scale=1)
         unit_rgb = tuple(int(channel * beam_fade) for channel in (120, 120, 120))
         unit_pen = make_pen(unit_rgb)
         graphics.set_pen(unit_pen)
         graphics.rectangle(degree_x, temp_y, 2, 2)
-        draw_pixel_text("C", degree_x + 4, temp_y + 2, unit_pen, scale=1)
+        draw_pixel_text(DISPLAY_TEMPERATURE_UNIT, degree_x + 4, temp_y + 2, unit_pen, scale=1)
 
     draw_divider_line(42, clock_second, top=False, fault=data_fault)
 
@@ -1497,6 +1532,7 @@ def draw_weather(data, now_ms, pulses):
 
 EMPTY_WEATHER = {
     "temperature_c": "--",
+    "temperature_unit": DISPLAY_TEMPERATURE_UNIT,
     "humidity": "--",
     "min_temperature_c": "--",
     "max_temperature_c": "--",
