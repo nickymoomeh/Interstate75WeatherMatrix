@@ -13,16 +13,27 @@ Keeping this boundary separate makes it easier to:
 
 import urequests
 
-from config import LATITUDE, LONGITUDE, TIMEZONE
+from config import LATITUDE, LONGITUDE, TIMEZONE, TEMPERATURE_UNIT
 
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
+# Validate once at import time so a typo in config.py fails clearly instead of
+# silently displaying values in an unexpected unit.
+DISPLAY_TEMPERATURE_UNIT = str(TEMPERATURE_UNIT).upper()
+if DISPLAY_TEMPERATURE_UNIT not in ("C", "F"):
+    raise ValueError('TEMPERATURE_UNIT must be "C" or "F"')
+
+OPEN_METEO_TEMPERATURE_UNIT = (
+    "fahrenheit" if DISPLAY_TEMPERATURE_UNIT == "F" else "celsius"
+)
+
 # These thresholds mirror the pressure-trend behaviour in the original
-# sensor-backed version of the display.
+# sensor-backed version of the display. The cold threshold has the same
+# physical meaning in either temperature unit.
 PRESSURE_SLOW_THRESHOLD = 0.5
 PRESSURE_FAST_THRESHOLD = 2.0
-COLD_THRESHOLD_C = 3.0
+COLD_THRESHOLD = 37.4 if DISPLAY_TEMPERATURE_UNIT == "F" else 3.0
 
 
 def _safe_float(value, default=None):
@@ -53,6 +64,7 @@ def _query_url():
 
     Daily minimum/maximum values are forecast/model values for the whole day,
     not the minimum/maximum observed by a physical sensor so far today.
+    Open-Meteo returns temperature fields directly in the configured unit.
     """
     current = (
         "temperature_2m,relative_humidity_2m,pressure_msl,"
@@ -69,6 +81,7 @@ def _query_url():
         + "&current=" + current
         + "&hourly=" + hourly
         + "&daily=" + daily
+        + "&temperature_unit=" + OPEN_METEO_TEMPERATURE_UNIT
         + "&forecast_days=1"
         + "&past_hours=3"
         + "&timezone=" + TIMEZONE.replace("/", "%2F")
@@ -134,7 +147,9 @@ def fetch_weather(timeout_seconds=8):
     The returned dictionary deliberately uses the same field names as the
     original Pi/sensor-backed display wherever practical. Keeping this small
     compatibility contract means the rendering and animation code does not
-    care where its weather came from.
+    care where its weather came from. The historical ``*_temperature_c`` key
+    names are retained for that compatibility even when Fahrenheit is selected;
+    ``temperature_unit`` states which unit the numeric values actually use.
 
     Raises an exception on network/HTTP/JSON failure. The caller should retain
     the previous successful weather data and try again at the next refresh.
@@ -177,10 +192,11 @@ def fetch_weather(timeout_seconds=8):
         "data_ok": True,
         "forecast_ok": True,
         "temperature_c": temperature,
+        "temperature_unit": DISPLAY_TEMPERATURE_UNIT,
         "humidity": _safe_float(current.get("relative_humidity_2m")),
         "min_temperature_c": _safe_float(first_daily("temperature_2m_min")),
         "max_temperature_c": _safe_float(first_daily("temperature_2m_max")),
-        "is_cold": temperature is not None and temperature <= COLD_THRESHOLD_C,
+        "is_cold": temperature is not None and temperature <= COLD_THRESHOLD,
         "pressure_hpa": _safe_float(current.get("pressure_msl")),
         "pressure_change_3h": pressure_change,
         "pressure_trend": _classify_pressure_trend(pressure_change),
