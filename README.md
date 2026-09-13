@@ -41,7 +41,7 @@ The code targets Pimoroni's MicroPython build for the Interstate 75 W.
 - `main.py` — display loop, rendering, animation and runtime state
 - `sprites.py` — static pixel artwork, colour palettes and animation-frame data
 - `weather_source.py` — Open-Meteo request and translation into the fields used by the display
-- `config.py` — normal user-editable settings such as location, timezone, refresh rate and brightness behaviour
+- `config.py` — normal user-editable settings such as location, timezone, temperature unit, clock format, refresh rate and brightness behaviour
 - `secrets.example.py` — safe Wi-Fi credentials template
 - `secrets.py` — your real Wi-Fi credentials; intentionally ignored by Git
 
@@ -96,7 +96,29 @@ Australia/Sydney
 
 Open-Meteo returns the correct UTC offset for the requested timezone and the display uses that to convert NTP's UTC clock to local time. This means daylight-saving changes are not hard-coded to the UK.
 
-### 5. Reboot
+### 5. Choose temperature and clock units if required
+
+The defaults are Celsius and a 24-hour clock:
+
+```python
+TEMPERATURE_UNIT = "C"
+CLOCK_FORMAT = 24
+```
+
+For Fahrenheit and a 12-hour clock:
+
+```python
+TEMPERATURE_UNIT = "F"
+CLOCK_FORMAT = 12
+```
+
+Open-Meteo returns temperature values directly in the selected unit. Fahrenheit therefore does not require repeated conversion in the animation loop. The display's cold-warning threshold and colour bands retain the same physical meanings in either unit.
+
+Twelve-hour mode omits AM/PM to preserve space on the 64×64 display. For example, `18:47` becomes `6:47`; midnight is `12:00`. Twelve-hour mode also omits the leading zero, so `09:00` becomes `9:00`.
+
+The bottom `MIN`/`MAX` readings normally keep one decimal place. In Fahrenheit mode, values of 100°F or above are shown as whole degrees so three-digit temperatures remain legible in the narrow bottom-row areas.
+
+### 6. Reboot
 
 On boot the display will:
 
@@ -114,6 +136,8 @@ On boot the display will:
 LATITUDE = 51.5074
 LONGITUDE = -0.1278
 TIMEZONE = "Europe/London"
+TEMPERATURE_UNIT = "C"
+CLOCK_FORMAT = 24
 WEATHER_REFRESH_SECONDS = 600
 TARGET_FRAME_MS = 125
 NIGHT_DIM_FACTOR = 0.35
@@ -184,7 +208,7 @@ Bug reports, questions and improvements are welcome through **GitHub Issues**. P
 
 ## Status
 
-The standalone software structure is complete and ready for testing on physical Interstate 75 W hardware. It was derived from a working sensor-backed display, but the direct Open-Meteo edition should be treated as **pre-release until it has been exercised on the real controller and matrix**.
+The standalone build has been tested on a physical Interstate 75 W and 64×64 HUB75 panel and successfully fetched and displayed live Open-Meteo data. It is usable, but remains an evolving hobby project and additional hardware/configuration combinations may reveal edge cases.
 
 ## Licence
 
