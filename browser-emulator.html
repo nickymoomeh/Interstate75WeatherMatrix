@@ -1,1 +1,155 @@
-PLACEHOLDER
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Interstate 75 Weather Matrix — Browser Emulator</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d10;--panel:#141820;--line:#2a313d;--text:#e7ebf0;--muted:#98a2b3;--accent:#64d5df}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:24px;display:grid;grid-template-columns:minmax(320px,560px) minmax(280px,1fr);gap:24px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+h1{font-size:22px;margin:0 0 6px}p{margin:6px 0 14px;color:var(--muted)}
+canvas{width:min(100%,640px);aspect-ratio:1/1;display:block;background:#000;border:1px solid #242a34;border-radius:8px;image-rendering:pixelated}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+input,select,button{width:100%;border:1px solid #394250;background:#0d1117;color:var(--text);border-radius:8px;padding:10px;font:inherit}
+button{cursor:pointer;background:#18232b;border-color:#3a5861}
+button.primary{background:#103b40;border-color:#2a858f}
+button:disabled{opacity:.55;cursor:not-allowed}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.status{min-height:20px;margin-top:10px;color:var(--muted)}
+.status.ok{color:#83d49f}.status.err{color:#ff9b9b}
+.results{margin-top:8px;display:grid;gap:6px}
+.result{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#0e1319;cursor:pointer}
+.result:hover{border-color:#4d6971}
+.small{font-size:12px;color:var(--muted)}
+details{margin-top:14px}summary{cursor:pointer;color:#c9d1d9}
+code{background:#0d1117;padding:2px 5px;border-radius:4px}
+@media(max-width:820px){.wrap{grid-template-columns:1fr}.card{padding:14px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section class="card">
+    <h1>Interstate 75 Weather Matrix</h1>
+    <p>Browser emulator for the standalone 64×64 Open-Meteo edition.</p>
+    <canvas id="matrix" width="64" height="64" aria-label="64 by 64 weather matrix emulator"></canvas>
+    <div id="status" class="status">Enter a location or latitude/longitude, then press Start.</div>
+  </section>
+
+  <section class="card">
+    <div>
+      <label for="place">Find a place (optional)</label>
+      <div class="row">
+        <input id="place" placeholder="e.g. Chicago, Paris, Sydney">
+        <button id="searchBtn">Search</button>
+      </div>
+      <div id="results" class="results"></div>
+    </div>
+
+    <div class="grid" style="margin-top:14px">
+      <div><label for="lat">Latitude</label><input id="lat" type="number" step="any" value="51.5074"></div>
+      <div><label for="lon">Longitude</label><input id="lon" type="number" step="any" value="-0.1278"></div>
+      <div><label for="unit">Temperature</label><select id="unit"><option value="C">Celsius (°C)</option><option value="F">Fahrenheit (°F)</option></select></div>
+      <div><label for="clock">Clock</label><select id="clock"><option value="24">24 hour</option><option value="12">12 hour</option></select></div>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button id="startBtn" class="primary">Start / Apply</button>
+      <button id="demoBtn">Demo weather</button>
+    </div>
+
+    <details>
+      <summary>How it works</summary>
+      <p class="small">The page calls Open-Meteo directly from your browser. Weather refreshes every 10 minutes; animation runs locally. Settings are saved only in your browser using <code>localStorage</code>. No Wi-Fi password or API key is required.</p>
+      <p class="small">The 12-hour option deliberately omits AM/PM to preserve the real matrix layout. Three-digit Fahrenheit MIN/MAX values drop the decimal, matching the firmware.</p>
+    </details>
+  </section>
+</div>
+
+<script>
+"use strict";
+
+const W=64,H=64, canvas=document.getElementById("matrix"), ctx=canvas.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+const $=id=>document.getElementById(id);
+const BLACK=[0,0,0], WARM=[180,115,35];
+const FONT={
+"0":["111","101","101","101","111"],"1":["010","110","010","010","111"],
+"2":["111","001","111","100","111"],"3":["111","001","111","001","111"],
+"4":["101","101","111","001","001"],"5":["111","100","111","001","111"],
+"6":["111","100","111","101","111"],"7":["111","001","001","001","001"],
+"8":["111","101","111","101","111"],"9":["111","101","111","001","111"],
+":":["0","1","0","1","0"],".":["0","0","0","0","1"],"-":["000","000","111","000","000"],
+"%":["101","001","010","100","101"],"A":["010","101","111","101","101"],
+"C":["111","100","100","100","111"],"F":["111","100","110","100","100"],
+"H":["101","101","111","101","101"],"I":["1","1","1","1","1"],
+"M":["101","111","111","101","101"],"N":["101","111","111","111","101"],
+"X":["101","101","010","101","101"]," ":["0","0","0","0","0"]
+};
+const ARROWS={
+rising_fast:["0001000","0011100","0111110","0001000","0001000","0001000","0001000","0001000","0001000"],
+rising_slow:["0001111","0000011","0000101","0001000","0010000","0100000","1000000","0000000","0000000"],
+steady:["0000000","0001000","0001100","1111110","1111111","0001100","0001000","0000000","0000000"],
+falling_slow:["1000000","0100000","0010000","0001000","0000101","0000011","0001111","0000000","0000000"],
+falling_fast:["0001000","0001000","0001000","0001000","0001000","0111110","0011100","0001000","0000000"]
+};
+const BIRD_COLOURS=[[[82,48,22],[150,55,18],[55,38,24],[150,105,22]],[[24,72,120],[130,112,18],[38,95,135],[125,120,55]],[[92,58,30],[135,110,72],[55,35,20],[125,86,30]],[[20,22,25],[48,48,52],[8,8,10],[150,92,8]],[[35,112,42],[78,145,35],[18,76,38],[175,62,18]],[[118,20,28],[165,38,22],[20,70,125],[175,120,45]],[[135,110,18],[165,138,28],[28,105,48],[175,75,15]]];
+const BIRD_BODY=[[5,0],[6,0],[4,1],[5,1],[6,1],[2,2],[3,2],[4,2],[5,2],[6,2],[1,3],[2,3],[3,3],[4,3],[5,3],[6,3],[1,4],[2,4],[3,4],[4,4],[5,4],[2,5],[3,5],[4,5]];
+const BIRD_PECK_BODY=[[4,1],[5,1],[2,2],[3,2],[4,2],[5,2],[6,2],[1,3],[2,3],[3,3],[4,3],[5,3],[6,3],[7,3],[1,4],[2,4],[3,4],[4,4],[5,4],[6,4],[7,4],[2,5],[3,5],[4,5],[5,5],[6,5],[7,5],[3,6],[4,6],[5,6],[6,6],[7,6]];
+const BIRD_WINGS=[[[2,3],[3,3],[4,3],[3,4],[4,4]],[[2,2],[3,1],[3,2],[4,2],[4,3]],[[2,3],[3,3],[4,3],[3,4],[3,5]]],BIRD_WING_SEQUENCE=[0,1,0,2];
+const DUCK_BODY=[[0,4],[1,3],[1,4],[1,5],[2,3],[3,3],[4,3],[5,3],[6,3],[7,3],[8,3],[2,4],[3,4],[4,4],[5,4],[6,4],[7,4],[8,4],[9,4],[10,4],[2,5],[3,5],[4,5],[5,5],[6,5],[7,5],[8,5],[9,5],[10,5],[3,6],[4,6],[5,6],[6,6],[7,6],[8,6],[9,6]];
+const DUCK_HEAD=[[8,0],[9,0],[10,0],[7,1],[8,1],[9,1],[10,1],[11,1],[7,2],[8,2],[9,2],[10,2],[11,2],[8,3],[9,3],[10,3]],DUCK_WING=[[3,4],[4,4],[5,4],[6,4],[7,4],[4,5],[5,5],[6,5],[7,5],[5,6],[6,6]],DUCK_BILL=[[12,2],[13,2],[11,3],[12,3]],DUCKLING=[[0,2],[1,1],[1,2],[2,2],[1,3],[2,3],[2,0],[3,0],[3,1]];
+const UFO_BOB=[0,0,-1,-1,0,1,1,0], LEAF_WAVE=[0,2,4,2,0,-2,-4,-2], SNOW_FLUTTER=[0,1,2,1,0,-1,-2,-1];
+let settings={lat:51.5074,lon:-0.1278,unit:"C",clock:24};
+let weather=null,lastFetch=0,utcOffset=0,timezone="UTC",demo=false;
+let ground={kind:null,level:0,last:0};
+let creature={active:false,next:0,start:0,kind:"bird",species:0,right:true,duration:9000,perch:16,turnaround:false};
+let ufo={active:false,next:0,start:0,right:true,y:8,duration:6500,colour:0};
+let fish={active:false,next:0,start:0,right:true,y:58,duration:9000};
+let abduction={active:false,start:0,lastKey:""};
+let star={active:false,next:0,start:0,right:true,y:8};
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function rgb(c){return `rgb(${c[0]},${c[1]},${c[2]})`}
+function px(x,y,c){if(x>=0&&x<64&&y>=0&&y<64){ctx.fillStyle=rgb(c);ctx.fillRect(Math.floor(x),Math.floor(y),1,1)}}
+function rect(x,y,w,h,c){ctx.fillStyle=rgb(c);ctx.fillRect(Math.floor(x),Math.floor(y),Math.floor(w),Math.floor(h))}
+function clear(){ctx.fillStyle="#000";ctx.fillRect(0,0,64,64)}
+function textWidth(t,s=1){t=String(t).toUpperCase();let n=0;[...t].forEach((ch,i)=>{const g=FONT[ch]||FONT[" "];n+=Math.max(...g.map(r=>r.length))*s;if(i<t.length-1)n+=s});return n}
+function ptext(t,x,y,c,s=1){t=String(t).toUpperCase();let cx=x;for(const [i,ch] of [...t].entries()){const g=FONT[ch]||FONT[" "],gw=Math.max(...g.map(r=>r.length));for(let yy=0;yy<g.length;yy++)for(let xx=0;xx<g[yy].length;xx++)if(g[yy][xx]==="1")rect(cx+xx*s,y+yy*s,s,s,c);cx+=gw*s+(i<t.length-1?s:0)}}
+function outlineText(t,x,y,s=1){for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]])ptext(t,x+dx,y+dy,BLACK,s)}
+function bitmap(rows,x,y,c,th=1){for(let yy=0;yy<rows.length;yy++)for(let xx=0;xx<rows[yy].length;xx++)if(rows[yy][xx]==="1")rect(x+xx,y+yy,th,th,c)}
+function outlineBitmap(rows,x,y,th=1){for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]])bitmap(rows,x+dx,y+dy,BLACK,th)}
+function tempC(v){return settings.unit==="F"?(v-32)*5/9:v}
+function tempColour(v){let t=tempC(Number(v));if(!Number.isFinite(t))return[85,85,85];const w=[238,244,245],b=[22,120,238],y=[255,218,26],o=[255,118,16],r=[244,42,38],p=[214,50,232];const blend=(a,z,q)=>a.map((v,i)=>Math.round(v+(z[i]-v)*q));if(t<=1)return w;if(t<=3)return b;if(t<=14)return blend(b,y,(t-3)/11);if(t<=24)return blend(y,o,(t-14)/10);if(t<=28)return blend(o,r,(t-24)/4);if(t<=30)return r;return p}
+function pressureColour(t){return t.startsWith("rising")?[57,202,100]:t==="falling_slow"?[255,159,33]:t==="falling_fast"?[245,45,53]:[231,240,241]}
+function localDate(){return new Date(Date.now()+utcOffset*1000)}
+function clockText(){const d=localDate(),h=d.getUTCHours(),m=d.getUTCMinutes();if(settings.clock===12){const hh=h%12||12;return `${hh}:${String(m).padStart(2,"0")}`}return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`}
+function dayMinute(){const d=localDate();return d.getUTCHours()*60+d.getUTCMinutes()}
+function hmMinutes(s){if(!s)return null;const m=String(s).match(/T(\d\d):(\d\d)/);return m?Number(m[1])*60+Number(m[2]):null}
+function daylight(){if(!weather)return false;const a=hmMinutes(weather.sunrise),b=hmMinutes(weather.sunset),n=dayMinute();return a!=null&&b!=null&&n>=a&&n<b}
+function afterSunset(){if(!weather)return false;const a=hmMinutes(weather.sunrise),b=hmMinutes(weather.sunset),n=dayMinute();return a!=null&&b!=null&&(n>=b||n<a)}
+function rand(seed){let x=Math.sin(seed)*10000;return x-Math.floor(x)}
+function drawLargeBirdPixels(points,x,y,right,c){for(const [dx,dy] of points){const xx=x+(right?dx*2:(8-dx)*2),yy=y+dy*2;rect(xx,yy,2,2,c)}}
+function creatureMotion(e,duration,originRight,turnaround){if(!turnaround)return[Math.floor(82*e/duration),originRight,false];const phase=Math.floor(e*1000/duration);let progress;if(phase<300)progress=Math.floor(phase*35/300);else if(phase<450)progress=35+Math.floor((phase-300)*10/150);else if(phase<600)progress=45;else if(phase<750)progress=45-Math.floor((phase-600)*10/150);else progress=Math.max(0,35-Math.floor((phase-750)*35/250));return[progress,phase<525?originRight:!originRight,phase>=450&&phase<600]}
+function drawCreature(now){if(!daylight()){creature.active=false;creature.next=0;return}if(!creature.next){creature.next=now+20000+Math.random()*20000;return}if(!creature.active){if(now<creature.next)return;let perches=[16,42,63];if(ground.level){const surface=64-ground.level;perches=perches.filter(p=>p<surface)}const duck=Math.random()<.125;creature={active:true,next:creature.next,start:now,kind:duck?"duck":"bird",species:Math.floor(Math.random()*BIRD_COLOURS.length),right:Math.random()>.5,duration:duck?12000+Math.random()*4000:6500+Math.random()*4500,perch:duck?16:perches[Math.floor(Math.random()*perches.length)],turnaround:!duck&&Math.random()<.25}}const e=now-creature.start;if(e>=creature.duration){creature.active=false;creature.next=now+20000+Math.random()*20000;return}if(creature.kind==="duck"){const x=creature.right?-32+Math.floor(e*(96)/creature.duration):64-Math.floor(e*96/creature.duration);drawDuck(x,8,creature.right,e);return}const [progress,right,stopped]=creatureMotion(e,creature.duration,creature.right,creature.turnaround);const x=Math.floor(creature.right?-18+progress:64-progress),hop=stopped?0:[0,0,-1,-2,-1,0,0,0][Math.floor(e/150)%8],y=creature.perch-14+hop,[body,breast,wing,beak]=BIRD_COLOURS[creature.species];const wf=BIRD_WING_SEQUENCE[Math.floor(e/250)%BIRD_WING_SEQUENCE.length];drawLargeBirdPixels(BIRD_BODY,x,y,right,body);drawLargeBirdPixels([[5,2],[6,2],[5,3],[5,4]],x,y,right,breast);drawLargeBirdPixels(BIRD_WINGS[wf],x,y,right,wing);drawLargeBirdPixels([[3,6],[5,6]],x,y,right,beak);drawLargeBirdPixels([[7,1],[8,1]],x,y,right,beak);rect(x+(right?13:4),y+1,1,2,BLACK)}
+function drawDuck(x,y,right,e){const mirror=31,dx=v=>x+(right?v:mirror-v),cols=[[144,102,40],[32,160,106],[96,68,30],[242,165,34],[240,204,47],[181,121,18]];for(const [pts,c] of [[DUCK_BODY,cols[0]],[DUCK_HEAD,cols[1]],[DUCK_WING,cols[2]],[DUCK_BILL,cols[3]]])for(const [a,b] of pts)px(dx(18+a),y+b,c);const step=Math.floor(e/250);for(const [i,base] of [13,7,1].entries()){const bob=(step+i*2)%6===1?-1:0;for(const [a,b] of DUCKLING)px(dx(base+a),y+4+b+bob,cols[4]);px(dx(base+3),y+4+bob,BLACK)}}
+function precipitationTarget(){if(!weather)return[null,0];const rain=Math.max(Number(weather.rain)||0,Number(weather.showers)||0),snow=Number(weather.snowfall)||0;if(snow>0)return["snow",snow<.3?4:snow<1?12:21];if(rain>0)return["rain",rain<.3?2:rain<1.5?10:32];return[null,0]}
+function updateGround(now){const [kind,target]=precipitationTarget();if(kind&&kind!==ground.kind){ground={kind,level:1,last:now};return}if(!ground.last)ground.last=now;if(now-ground.last<600)return;if(target>ground.level)ground.level++;else if(target<ground.level)ground.level--;if(ground.level<=0)ground.kind=null;ground.last=now}
+function drawGround(now){updateGround(now);if(!ground.kind||ground.level<=0)return;if(ground.kind==="rain"){const y=64-ground.level;for(const [i,c] of [[[0,82,125],0],[[7,62,112],1],[[6,46,96],2],[[5,31,76],3]]){}for(let b=0;b<4;b++){const s=Math.floor(ground.level*b/4),e=Math.floor(ground.level*(b+1)/4);if(e>s)rect(0,y+s,64,e-s,[[10,82,125],[7,62,112],[6,46,96],[5,31,76]][b])}rect(0,y,64,1,[11,131,178])}else{for(let x=0;x<64;x++){const h=Math.min(21,ground.level+[0,1,0,0,1,1,0,1][Math.floor(x/4)%8]);rect(x,64-h,1,h,[83,108,128]);px(x,64-h,[216,233,241])}}}
+function drawParticles(now){if(!weather)return;const rain=Math.max(Number(weather.rain)||0,Number(weather.showers)||0),snow=Number(weather.snowfall)||0,wind=Math.max(Number(weather.wind)||0,(Number(weather.gust)||0)*.65),dx=-Math.sin((Number(weather.winddir)||0)*Math.PI/180);if(rain>0){const count=rain<.3?3:rain<1.5?5:7,cycle=rain<.3?3200:rain<1.5?2500:1800;for(let i=0;i<count;i++){const p=((now+i*337)%cycle)/cycle,y=Math.floor(p*72)-5,x=2+Math.floor(((3+((i*19+7)%58))-2+p*dx*Math.min(18,wind*.42)+60)%60);px(x,y,[24,188,231]);px(x,y-1,[7,136,189])}}else if(snow>0){for(let i=0;i<(snow<.3?3:5);i++){const p=((now+i*911)%5200)/5200,y=Math.floor(p*70)-3,x=2+Math.floor(((3+((i*23+11)%58))-2+Math.sin(p*Math.PI*4+i)*2+60)%60);px(x,y,[239,252,255]);px(x+1,y,[117,154,189])}}else if(wind>=8){for(let i=0;i<(wind<20?1:wind<40?2:4);i++){const travel=Math.max(3600,7600-wind*65),window=(now+i*1900)%(travel+3000);if(window>=travel)continue;const p=window/travel,right=dx>=0,x=Math.floor(right?-3+p*70:66-p*70),y=Math.floor(18+(i*13)%28+Math.sin(p*Math.PI*4+i)*4);px(x,y,[232,120,8]);px(x+(right?1:-1),y+1,[197,165,27])}}}
+function drawPressure(trend){const rows=ARROWS[trend]||ARROWS.steady;outlineBitmap(rows,52,50,2);bitmap(rows,52,50,pressureColour(trend),2)}
+function formatTemp(v){return Number.isFinite(Number(v))?Number(v).toFixed(1):"--.-"}
+function dailyParts(v){if(!Number.isFinite(Number(v)))return["--",""];const n=Number(v);if(settings.unit==="F"&&Math.abs(n)>=100)return[Math.round(n).toString(),""];const [a,b]=n.toFixed(1).split(".");return[a,"."+b]}
+function drawDaily(v,x,w,c){const [whole,frac]=dailyParts(v),ww=textWidth(whole,2),fw=frac?textWidth(frac,1):0,total=ww+(frac?1:0)+fw;if(total<=w){const xx=x+Math.floor((w-total)/2);outlineText(whole,xx,52,2);ptext(whole,xx,52,c,2);if(frac){outlineText(frac,xx+ww+1,57,1);ptext(frac,xx+ww+1,57,c,1)}}else{const t=whole+frac,xx=x+Math.max(0,Math.floor((w-textWidth(t))/2));outlineText(t,xx,57);ptext(t,xx,57,c)}}
+function render(now){clear();drawParticles(now);drawGround(now);const d=localDate(),sec=d.getUTCSeconds(),clock=clockText(),hum=`${Math.round(Number(weather?.humidity)||0)}%`,temp=formatTemp(weather?.temp),min=weather?.min,max=weather?.max;ptext(clock,2,3,[231,240,241],2);ptext(hum,62-textWidth(hum,2),3,[0,197,213],2);rect(2,16,60,1,[0,127,139]);rect(2+sec,15,1,3,[19,229,238]);const scale=textWidth(temp,3)<=40?3:2,tw=textWidth(temp,scale),tx=Math.max(3,Math.floor((49-tw)/2)+3),ty=scale===3?21:24;outlineText(temp,tx,ty,scale);ptext(temp,tx,ty,tempColour(weather?.temp),scale);const ux=tx+tw+1;rect(ux,ty,2,2,[231,240,241]);ptext(settings.unit,ux+4,ty+2,[231,240,241]);rect(2,42,60,1,[152,96,25]);rect(2+sec,41,1,3,[255,192,58]);outlineText("MIN",4,45);outlineText("MAX",26,45);ptext("MIN",4,45,[147,162,166]);ptext("MAX",26,45,[147,162,166]);drawDaily(min,4,20,tempColour(min));drawDaily(max,25,23,tempColour(max));drawPressure(weather?.trend||"steady");drawCreature(now);}
+async function fetchWeather(){const unit=settings.unit==="F"?"fahrenheit":"celsius";const url=`https://api.open-meteo.com/v1/forecast?latitude=${settings.lat}&longitude=${settings.lon}&current=temperature_2m,relative_humidity_2m,pressure_msl,rain,showers,snowfall,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=pressure_msl&daily=temperature_2m_min,temperature_2m_max,sunrise,sunset&temperature_unit=${unit}&forecast_days=1&past_hours=3&timezone=auto`;const r=await fetch(url);if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json(),p=Number(j.current.pressure_msl),hist=j.hourly.pressure_msl||[],old=hist.length?Number(hist[Math.max(0,hist.length-4)]):p,chg=p-old;const trend=chg>=2?"rising_fast":chg>=.5?"rising_slow":chg<=-2?"falling_fast":chg<=-.5?"falling_slow":"steady";weather={temp:j.current.temperature_2m,humidity:j.current.relative_humidity_2m,min:j.daily.temperature_2m_min?.[0],max:j.daily.temperature_2m_max?.[0],rain:j.current.rain,showers:j.current.showers,snowfall:j.current.snowfall,wind:j.current.wind_speed_10m,winddir:j.current.wind_direction_10m,gust:j.current.wind_gusts_10m,trend,sunrise:j.daily.sunrise?.[0],sunset:j.daily.sunset?.[0]};utcOffset=j.utc_offset_seconds||0;timezone=j.timezone||"UTC";$("status").textContent=`Live: ${timezone} • ${formatTemp(weather.temp)}°${settings.unit}`;$("status").className="status ok";lastFetch=Date.now()}
+function applySettings(){settings={lat:Number($("lat").value),lon:Number($("lon").value),unit:$("unit").value,clock:Number($("clock").value)};localStorage.setItem("matrixSettings",JSON.stringify(settings));fetchWeather().catch(e=>{$("status").textContent=`Weather error: ${e.message}`;$("status").className="status err"})}
+$("startBtn").onclick=applySettings;$("demoBtn").onclick=()=>{weather={temp:settings.unit==="F"?68.4:20.2,humidity:71,min:settings.unit==="F"?62.1:16.7,max:settings.unit==="F"?104:40,rain:.8,showers:0,snowfall:0,wind:18,winddir:230,gust:31,trend:"falling_slow",sunrise:"2026-09-13T06:20",sunset:"2026-09-13T19:20"};utcOffset=3600;timezone="Demo";$("status").textContent="Demo weather";$("status").className="status"};
+$("searchBtn").onclick=async()=>{const q=$("place").value.trim();if(!q)return;const r=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=en&format=json`),j=await r.json();$("results").innerHTML="";for(const item of (j.results||[])){const d=document.createElement("div");d.className="result";d.textContent=[item.name,item.admin1,item.country].filter(Boolean).join(", ");d.onclick=()=>{$("lat").value=item.latitude;$("lon").value=item.longitude;$("results").innerHTML=""};$("results").appendChild(d)}};
+try{const s=JSON.parse(localStorage.getItem("matrixSettings"));if(s){settings={...settings,...s};$("lat").value=settings.lat;$("lon").value=settings.lon;$("unit").value=settings.unit;$("clock").value=settings.clock}}catch{}
+setInterval(()=>{if(weather&&Date.now()-lastFetch>600000)fetchWeather().catch(()=>{})},30000);function loop(t){render(t);requestAnimationFrame(loop)}requestAnimationFrame(loop);
+</script>
+</body>
+</html>
