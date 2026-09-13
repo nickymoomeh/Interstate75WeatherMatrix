@@ -9,6 +9,15 @@ LATITUDE = 51.5074
 LONGITUDE = -0.1278
 TIMEZONE = "Europe/London"
 
+# Temperature display unit. Open-Meteo will return temperatures directly in
+# the selected unit, so no per-frame conversion is needed on the Pico.
+# Supported values: "C" or "F".
+TEMPERATURE_UNIT = "C"
+
+# Clock display format. Use 24 for e.g. 18:47, or 12 for e.g. 6:47.
+# Twelve-hour mode deliberately omits AM/PM to keep the 64x64 layout compact.
+CLOCK_FORMAT = 24
+
 # Open-Meteo data does not need to be requested every few seconds. The weather
 # model updates much more slowly than the display animation loop.
 WEATHER_REFRESH_SECONDS = 600
