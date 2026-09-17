@@ -8,7 +8,7 @@ lives in sprites.py.
 Normal users should only need to edit config.py and create secrets.py.
 """
 
-from interstate75 import Interstate75, DISPLAY_INTERSTATE75_64X64
+from interstate75 import Interstate75, DISPLAY_INTERSTATE75_64X64, SWITCH_A
 import network
 import time
 import ntptime
@@ -28,11 +28,15 @@ from sprites import (
     FISH_COLOURS, FISH_ACCENTS, FISH_WIDTHS, FISH_HEIGHTS, FISH_TAIL_SHIFT,
     FESTIVE_COLOURS, FESTIVE_BRIGHT,
     UFO_WIDTHS, UFO_DOMES, UFO_ROWS, UFO_LIGHTS, UFO_LIGHT_Y, UFO_BEAM_Y,
-    UFO_COLOURS, UFO_DIM_LIGHTS, UFO_DAY_LIGHTS, UFO_BOB,
+    UFO_COLOURS, UFO_DIM_LIGHTS, UFO_DAY_LIGHTS,
+    FESTIVE_UFO_COLOURS, FESTIVE_UFO_DIM_LIGHTS, FESTIVE_UFO_DAY_LIGHTS,
+    UFO_BOB,
     BIRD_COLOURS, BIRD_PECK_BODY, BIRD_BODY, BIRD_WING_FRAMES,
     BIRD_WING_SEQUENCE,
     DUCK_BODY, DUCK_HEAD, DUCK_WING, DUCK_BILL, DUCKLING_BODY,
     DUCKLING_BILL, DUCK_COLOURS, DUCK_FAMILY_WIDTH,
+    FESTIVE_FAMILY_WIDTH, SANTA_RED, SANTA_WHITE, SANTA_SKIN,
+    SLEIGH_RED, SLEIGH_GOLD, REINDEER_BODY, REINDEER_ANTLERS,
     ABDUCTION_COLOURS, ABDUCTION_DIM_LIGHTS, ABDUCTION_BEAM_SHADES,
     ABDUCTION_DAY_LIGHTS, ABDUCTION_DAY_BEAM_SHADES,
     LEAF_FRAMES, LEAF_FRAME_SEQUENCE,
@@ -112,7 +116,7 @@ SHOOTING_STAR = {"active": False, "next_ms": 0, "start_ms": 0, "right": True, "y
 UFO_STATE = {
     "active": False, "next_ms": 0, "start_ms": 0, "right": True,
     "y": 8, "colour": 0, "style": 0, "mode": 0,
-    "duration_ms": 6000, "hover_x": 28, "daylight": False,
+    "duration_ms": 6000, "hover_x": 28, "daylight": False, "festive": False,
 }
 DAY_CREATURE = {
     "active": False, "next_ms": 0, "start_ms": 0, "kind": "bird",
@@ -121,6 +125,7 @@ DAY_CREATURE = {
     "turnaround": False,
 }
 ABDUCTION = {"active": False, "start_ms": 0, "last_key": None, "colour": 0}
+FESTIVE_BUTTON = {"previous": False, "manual": None, "last_ms": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +549,27 @@ def local_time_parts():
 
 
 def is_festive_period():
-    return LOCAL_TIME_CACHE["festive"]
+    manual = FESTIVE_BUTTON["manual"]
+    return LOCAL_TIME_CACHE["festive"] if manual is None else manual
+
+
+def update_festive_button(now_ms):
+    # Rear button A toggles normal/festive mode for this boot. It is edge
+    # detected and debounced, avoiding flash writes and repeated toggles.
+    try:
+        pressed = i75.switch_pressed(SWITCH_A)
+        if (
+            pressed
+            and not FESTIVE_BUTTON["previous"]
+            and time.ticks_diff(now_ms, FESTIVE_BUTTON["last_ms"]) >= 250
+        ):
+            FESTIVE_BUTTON["manual"] = not is_festive_period()
+            FESTIVE_BUTTON["last_ms"] = now_ms
+            print("Festive mode:", "on" if FESTIVE_BUTTON["manual"] else "off")
+        FESTIVE_BUTTON["previous"] = pressed
+    except Exception:
+        # Older or unusual board builds should continue without the shortcut.
+        pass
 
 
 def event_minutes(value):
@@ -750,7 +775,9 @@ def draw_ufo(now_ms, daylight=False):
         UFO_STATE["start_ms"] = now_ms
         UFO_STATE["right"] = bool(seed & 1)
         UFO_STATE["y"] = 3 + ((seed >> 5) % 25)
-        UFO_STATE["colour"] = (seed >> 10) % len(UFO_COLOURS)
+        UFO_STATE["festive"] = is_festive_period()
+        palette_size = len(FESTIVE_UFO_COLOURS) if UFO_STATE["festive"] else len(UFO_COLOURS)
+        UFO_STATE["colour"] = (seed >> 10) % palette_size
         UFO_STATE["style"] = (seed >> 12) % len(UFO_WIDTHS)
         UFO_STATE["mode"] = mode
         UFO_STATE["duration_ms"] = (3800, 7200, 11500)[mode] + UFO_STATE["style"] * 650
@@ -786,7 +813,10 @@ def draw_ufo(now_ms, daylight=False):
         x = start_x + (elapsed * journey) // duration if direction > 0 else target_x - (elapsed * journey) // duration
 
     y = UFO_STATE["y"] + UFO_BOB[(elapsed // 300) % len(UFO_BOB)]
-    body, lights = UFO_COLOURS[UFO_STATE["colour"]]
+    colours = FESTIVE_UFO_COLOURS if UFO_STATE["festive"] else UFO_COLOURS
+    dim_lights = FESTIVE_UFO_DIM_LIGHTS if UFO_STATE["festive"] else UFO_DIM_LIGHTS
+    day_lights = FESTIVE_UFO_DAY_LIGHTS if UFO_STATE["festive"] else UFO_DAY_LIGHTS
+    body, lights = colours[UFO_STATE["colour"]]
     graphics.set_pen(cached_pen((90, 90, 105)))
     for dx, dy in UFO_DOMES[style]:
         draw_visible_pixel(x + dx, y + dy)
@@ -796,10 +826,10 @@ def draw_ufo(now_ms, daylight=False):
             draw_visible_pixel(x + dx, y + dy)
     light_y = UFO_LIGHT_Y[style]
     light_phase = (elapsed // 375) % 3
-    graphics.set_pen(cached_pen(UFO_DIM_LIGHTS[UFO_STATE["colour"]]))
+    graphics.set_pen(cached_pen(dim_lights[UFO_STATE["colour"]]))
     for dx in UFO_LIGHTS[style]:
         draw_visible_pixel(x + dx, y + light_y)
-    active_lights = UFO_DAY_LIGHTS[UFO_STATE["colour"]] if daylight else lights
+    active_lights = day_lights[UFO_STATE["colour"]] if daylight else lights
     graphics.set_pen(cached_pen(active_lights))
     for lamp_index, dx in enumerate(UFO_LIGHTS[style]):
         if (lamp_index + light_phase) % 3 == 0:
@@ -870,6 +900,48 @@ def draw_duck_family(x, y, right, elapsed):
         draw_visible_pixel(x + base_x + 3 if right else x + mirror - base_x - 3, y + 4 + bob)
 
 
+def draw_festive_procession(x, y, right, elapsed):
+    # Fixed pixel lists keep the procession cheap enough for the 8 FPS target.
+    mirror = FESTIVE_FAMILY_WIDTH - 1
+
+    def festive_pixel(dx, dy):
+        draw_visible_pixel(x + (dx if right else mirror - dx), y + dy)
+
+    for pixels, colour in (
+        (SANTA_RED, (145, 18, 22)),
+        (SANTA_WHITE, (155, 155, 145)),
+        (SANTA_SKIN, (150, 92, 55)),
+        (SLEIGH_RED, (125, 12, 18)),
+        (SLEIGH_GOLD, (165, 105, 10)),
+    ):
+        graphics.set_pen(cached_pen(colour))
+        for dx, dy in pixels:
+            festive_pixel(dx, dy)
+    graphics.set_pen(BLACK)
+    festive_pixel(9, 3)
+
+    leg_phase = (elapsed // 250) & 1
+    for index, base_x in enumerate((17, 29)):
+        bob = -1 if ((elapsed // 375) + index) % 6 == 1 else 0
+        graphics.set_pen(cached_pen((105, 62, 26)))
+        for dx, dy in REINDEER_BODY:
+            festive_pixel(base_x + dx, dy + bob)
+        graphics.set_pen(cached_pen((72, 42, 20)))
+        for dx, dy in REINDEER_ANTLERS:
+            festive_pixel(base_x + dx, dy + bob)
+        legs = ((2,7),(3,8),(5,7),(6,8)) if (leg_phase + index) & 1 else ((2,8),(3,7),(5,8),(6,7))
+        for dx, dy in legs:
+            festive_pixel(base_x + dx, dy + bob)
+        graphics.set_pen(BLACK)
+        festive_pixel(base_x + 8, 2 + bob)
+
+    graphics.set_pen(cached_pen((175, 24, 18)))
+    festive_pixel(38, 3)
+    graphics.set_pen(cached_pen((145, 92, 8)))
+    for dx in range(14, 31):
+        festive_pixel(dx, 6)
+
+
 def day_creature_motion(elapsed, duration, origin_right, turnaround):
     if not turnaround:
         return (elapsed * 82) // duration, origin_right, False
@@ -888,9 +960,15 @@ def day_creature_motion(elapsed, duration, origin_right, turnaround):
 
 
 def draw_day_creature(data, now_ms, second, data_fault=False):
-    if not is_daylight(data):
+    daylight = is_daylight(data)
+    festive = is_festive_period()
+    if not daylight and not festive:
         DAY_CREATURE["active"] = False
         DAY_CREATURE["next_ms"] = 0
+        return
+    if not daylight and DAY_CREATURE["active"] and DAY_CREATURE["kind"] != "santa":
+        DAY_CREATURE["active"] = False
+        schedule_day_creature(now_ms)
         return
     if DAY_CREATURE["next_ms"] == 0:
         schedule_day_creature(now_ms)
@@ -903,19 +981,23 @@ def draw_day_creature(data, now_ms, second, data_fault=False):
         if GROUND_STATE["level"]:
             surface = 64 - GROUND_STATE["level"]
             perches = [perch for perch in perches if perch < surface]
-        duck_visit = (seed & 7) == 0
+        santa_visit = festive and ((seed >> 21) & 7) == 0
+        if not daylight and not santa_visit:
+            schedule_day_creature(now_ms)
+            return
+        duck_visit = daylight and not santa_visit and (seed & 7) == 0
         DAY_CREATURE["active"] = True
         DAY_CREATURE["start_ms"] = now_ms
-        DAY_CREATURE["kind"] = "duck" if duck_visit else "bird"
+        DAY_CREATURE["kind"] = "santa" if santa_visit else ("duck" if duck_visit else "bird")
         DAY_CREATURE["species"] = (seed >> 4) % len(BIRD_COLOURS)
-        DAY_CREATURE["perch"] = 16 if duck_visit else perches[(seed >> 7) % len(perches)]
+        DAY_CREATURE["perch"] = 16 if (duck_visit or santa_visit) else perches[(seed >> 7) % len(perches)]
         DAY_CREATURE["right"] = bool(seed & 1)
-        DAY_CREATURE["duration_ms"] = (12000 + ((seed >> 11) % 4001)) if duck_visit else (7000 + ((seed >> 11) % 5001))
+        DAY_CREATURE["duration_ms"] = (14000 + ((seed >> 11) % 4001)) if santa_visit else ((12000 + ((seed >> 11) % 4001)) if duck_visit else (7000 + ((seed >> 11) % 5001)))
         interaction_roll = (seed >> 16) % 6
-        DAY_CREATURE["interact"] = not duck_visit and interaction_roll < 2
+        DAY_CREATURE["interact"] = not duck_visit and not santa_visit and interaction_roll < 2
         DAY_CREATURE["interaction_done"] = False
         DAY_CREATURE["interaction_start_ms"] = 0
-        DAY_CREATURE["turnaround"] = False if duck_visit else ((seed >> 19) & 3) == 0
+        DAY_CREATURE["turnaround"] = False if (duck_visit or santa_visit) else ((seed >> 19) & 3) == 0
 
     raw_elapsed = time.ticks_diff(now_ms, DAY_CREATURE["start_ms"])
     hold_ms = 900
@@ -928,12 +1010,15 @@ def draw_day_creature(data, now_ms, second, data_fault=False):
         schedule_day_creature(now_ms)
         return
 
-    # Ducks deliberately use the upper strip (y=8). That keeps them visible
-    # when rainwater/snow occupies the bottom of the display.
     if DAY_CREATURE["kind"] == "duck":
         progress = (elapsed * (64 + DUCK_FAMILY_WIDTH)) // duration
         x = -DUCK_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else 64 - progress
         draw_duck_family(x, 8, DAY_CREATURE["right"], elapsed)
+        return
+    if DAY_CREATURE["kind"] == "santa":
+        progress = (elapsed * (64 + FESTIVE_FAMILY_WIDTH)) // duration
+        x = -FESTIVE_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else 64 - progress
+        draw_festive_procession(x, 6, DAY_CREATURE["right"], elapsed)
         return
 
     progress, right, stopped = day_creature_motion(
@@ -971,7 +1056,6 @@ def draw_day_creature(data, now_ms, second, data_fault=False):
     eye_y = y + 9 if peck_down else y + 1
     draw_visible_pixel(eye_x, eye_y)
     draw_visible_pixel(eye_x, eye_y + 1)
-
 
 def update_abduction(data, now_ms):
     if not is_after_sunset(data):
@@ -1564,6 +1648,7 @@ while True:
     now = time.time()
     now_ms = frame_started_ms
     update_local_time_cache(now)
+    update_festive_button(now_ms)
     refresh_seconds = DEMO_REFRESH_SECONDS if DEMO_MODE else WEATHER_REFRESH_SECONDS
     fetch_elapsed_ms = 0
 
