@@ -20,9 +20,10 @@ The matrix shows:
 - accumulated rain/snow effects
 - sunrise/sunset-aware daytime and night-time scenes
 - animated birds, ducks and ducklings
+- a festive Santa-and-reindeer procession during December and January 1–14
 - fish when the rain accumulation becomes deep enough
 - stars and shooting stars after sunset
-- assorted UFOs
+- assorted UFOs, including festive red, white and green craft
 - a larger UFO that abducts the centre temperature every half hour after sunset
 - festive divider lights during December and early January
 
@@ -145,6 +146,12 @@ PERFORMANCE_LOGGING = False
 ```
 
 The default weather refresh is **10 minutes**. Open-Meteo's weather values do not need to be queried at animation-frame speed.
+
+### Festive mode button
+
+The rear **button A** toggles between normal and festive presentation for the current boot. After a restart, the display returns to automatic mode: festive presentation runs from 1 December through 14 January. The temporary override is intentionally kept in RAM so pressing the button does not cause repeated writes to the Pico's flash storage.
+
+During festive mode, the divider lights become coloured bulbs, some UFOs use Christmas palettes, and Santa with two trotting reindeer can cross the upper line during either daytime or nighttime.
 
 `TARGET_FRAME_MS = 125` gives a target of eight frames per second. The loop treats this as a complete frame budget: rendering time is subtracted before sleeping rather than adding a fixed delay after every rendered frame.
 
