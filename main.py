@@ -59,6 +59,15 @@ LIGHTNING_PULSE_PERIOD_MS = 2400
 ACCUMULATION_STEP_MS = 30000
 ACCUMULATION_DRAIN_MS = 60000
 
+# Network/time resilience. Weather values remain on screen during a temporary
+# outage, but the divider/seconds bars turn red once the last successful
+# Open-Meteo update is 30 minutes old.
+WEATHER_STALE_SECONDS = 30 * 60
+NTP_BOOT_ATTEMPTS = 5
+NTP_BOOT_RETRY_SECONDS = 2
+NTP_RETRY_MS = 5 * 60 * 1000
+NTP_RESYNC_MS = 24 * 60 * 60 * 1000
+
 DISPLAY_TEMPERATURE_UNIT = str(TEMPERATURE_UNIT).upper()
 if DISPLAY_TEMPERATURE_UNIT not in ("C", "F"):
     raise ValueError('TEMPERATURE_UNIT must be "C" or "F"')
@@ -485,17 +494,22 @@ def connect_wifi():
     return False
 
 
-def sync_time():
-    try:
-        show_message("Syncing", "time")
-        ntptime.settime()
-        print("Time synced")
-        print(time.localtime())
-        return True
-    except Exception as error:
-        print("Time sync failed:")
-        print(error)
-        return False
+def sync_time(attempts=1, retry_seconds=0, show_status=True):
+    attempts = max(1, int(attempts))
+    for attempt in range(attempts):
+        try:
+            if show_status:
+                show_message("Syncing", "time")
+            ntptime.settime()
+            print("Time synced")
+            print(time.localtime())
+            return True
+        except Exception as error:
+            print("Time sync failed (attempt {}/{}):".format(attempt + 1, attempts))
+            print(error)
+            if attempt + 1 < attempts and retry_seconds > 0:
+                time.sleep(retry_seconds)
+    return False
 
 
 def set_weather_timezone_offset(data):
@@ -1500,7 +1514,7 @@ def draw_warning_edges(data, now_ms):
         graphics.rectangle(62, 56, 2, 8)
 
 
-def draw_weather(data, now_ms, pulses):
+def draw_weather(data, now_ms, pulses, data_fault=False):
     clear_screen()
     update_abduction(data, now_ms)
     draw_night_sky(data, now_ms)
@@ -1514,7 +1528,6 @@ def draw_weather(data, now_ms, pulses):
     clock_text, clock_second = get_clock_parts()
     humidity_text = format_humidity(humidity)
     temp_text = format_temperature(temperature)
-    data_fault = not data.get("data_ok", True)
     min_whole, min_fraction = format_daily_temperature_parts(min_temp)
     max_whole, max_fraction = format_daily_temperature_parts(max_temp)
     trend = data.get("pressure_trend", "steady")
@@ -1636,10 +1649,17 @@ while not connect_wifi():
     show_message("WiFi", "waiting")
     time.sleep(10)
 
-sync_time()
+ntp_synced = sync_time(
+    attempts=NTP_BOOT_ATTEMPTS,
+    retry_seconds=NTP_BOOT_RETRY_SECONDS,
+    show_status=True,
+)
+last_ntp_attempt_ms = time.ticks_ms()
+last_ntp_success_ms = last_ntp_attempt_ms if ntp_synced else None
 
 latest_data = dict(EMPTY_WEATHER)
 last_fetch = 0
+last_weather_success = None
 pulses = PulseTracker()
 next_frame_ms = time.ticks_ms()
 
@@ -1652,11 +1672,26 @@ while True:
     refresh_seconds = DEMO_REFRESH_SECONDS if DEMO_MODE else WEATHER_REFRESH_SECONDS
     fetch_elapsed_ms = 0
 
+    # If boot-time NTP failed, retry every five minutes. Once synchronised,
+    # refresh the RTC daily. Runtime retries do not replace the weather display
+    # with a status message.
+    ntp_due_ms = NTP_RESYNC_MS if ntp_synced else NTP_RETRY_MS
+    ntp_reference_ms = last_ntp_success_ms if ntp_synced else last_ntp_attempt_ms
+    if time.ticks_diff(now_ms, ntp_reference_ms) >= ntp_due_ms:
+        last_ntp_attempt_ms = now_ms
+        if sync_time(show_status=False):
+            ntp_synced = True
+            last_ntp_success_ms = time.ticks_ms()
+            # NTP may have corrected the epoch substantially. Re-read it before
+            # using epoch-based weather refresh/freshness timestamps.
+            now = time.time()
+
     if now - last_fetch >= refresh_seconds:
         fetch_started_ms = time.ticks_ms()
         if DEMO_MODE:
             latest_data = get_demo_weather()
             last_fetch = now
+            last_weather_success = now
             print("Demo weather updated")
         else:
             try:
@@ -1664,21 +1699,50 @@ while True:
                 set_weather_timezone_offset(new_data)
                 latest_data = new_data
                 last_fetch = now
+                last_weather_success = now
                 print("Open-Meteo weather updated")
             except Exception as error:
-                # A temporary Internet/API failure should not wipe a perfectly
-                # usable display. Keep the last successful values and retry at
-                # the next normal refresh. Before the first success the fault
-                # placeholder remains visible.
+                # Keep the last successful weather visible. If Wi-Fi itself has
+                # dropped, actively reconnect so a router/AP outage heals
+                # without rebooting the display.
                 print("Weather fetch failed:")
                 print(error)
                 last_fetch = now
+                wlan = network.WLAN(network.STA_IF)
+                if not wlan.isconnected():
+                    print("WiFi disconnected; attempting recovery")
+                    if connect_wifi():
+                        print("WiFi recovered; retrying weather immediately")
+                        try:
+                            new_data = fetch_weather()
+                            set_weather_timezone_offset(new_data)
+                            latest_data = new_data
+                            now = time.time()
+                            last_fetch = now
+                            last_weather_success = now
+                            print("Open-Meteo weather updated after WiFi recovery")
+                            if not ntp_synced:
+                                last_ntp_attempt_ms = time.ticks_ms()
+                                if sync_time(show_status=False):
+                                    ntp_synced = True
+                                    last_ntp_success_ms = time.ticks_ms()
+                                    now = time.time()
+                        except Exception as retry_error:
+                            print("Weather retry after WiFi recovery failed:")
+                            print(retry_error)
         fetch_elapsed_ms = time.ticks_diff(time.ticks_ms(), fetch_started_ms)
         # HTTP/JSON parsing allocates temporary objects. Reclaim them here so
         # garbage collection does not interrupt an arbitrary animation frame.
         gc.collect()
 
-    update_elapsed_ms = draw_weather(latest_data, now_ms, pulses)
+    if DEMO_MODE:
+        data_fault = False
+    elif last_weather_success is None:
+        data_fault = True
+    else:
+        data_fault = (now - last_weather_success) >= WEATHER_STALE_SECONDS
+
+    update_elapsed_ms = draw_weather(latest_data, now_ms, pulses, data_fault=data_fault)
 
     # TARGET_FRAME_MS is a complete frame budget, not an additional sleep.
     # Subtract rendering/network time so a 125 ms target is genuinely ~8 FPS.
