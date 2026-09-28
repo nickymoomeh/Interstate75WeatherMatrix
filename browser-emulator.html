@@ -114,6 +114,7 @@ const FISH_ACCENTS=[[78,40,0],[44,64,72],[72,22,12],[8,58,54],[52,18,70],[62,58,
 const FISH_WIDTHS=[9,11,13];
 const FISH_HEIGHTS=[5,6,7];
 const FISH_TAIL_SHIFT=[0,-1,0,1];
+const RAIN_COLUMNS=[7,43,19,56,31,11,50,24,38,4,59,16,46,28,9,35,53,21,41,13,61,26,48,6,33,18,55,29,44,2,52];
 const FESTIVE_COLOURS=[[110,18,18],[18,92,30],[115,68,0],[15,48,105]];
 const FESTIVE_BRIGHT=[[175,35,28],[30,145,48],[185,112,5],[25,82,165]];
 const UFO_WIDTHS=[7,9,13,5,15];
@@ -229,14 +230,14 @@ function mod(n,d){return ((n%d)+d)%d}
 function windDxPercent(){return [0,-38,-71,-92,-100,-92,-71,-38,0,38,71,92,100,92,71,38][mod(Math.floor(((weather?.windDir||0)+11.25)/22.5),16)]}
 function weatherParticles(now){
   if(!weather)return;
-  const rain=Math.max(weather.rain||0,weather.showers||0), snow=weather.snow||0;
+  const rain=(weather.rain||0)+(weather.showers||0), snow=weather.snow||0;
   const wind=Math.max(weather.wind||0,(weather.gust||0)*.65);
   const windDx=windDxPercent()/100;
   if(rain>0){
     const count=rain<.3?3:rain<1.5?5:7, cyc=rain<.3?3200:rain<1.5?2500:1800;
     for(let i=0;i<count;i++){
-      const phase=(now+i*337)%cyc, p=phase/cyc, y=p*72-5;
-      const seed=3+((i*19+7)%58), x=2+((seed-2+p*windDx*Math.min(18,wind*.42)+60)%60);
+      const shifted=now+i*337,phase=shifted%cyc,p=phase/cyc,y=p*72-5;
+      const cycle=Math.floor(shifted/cyc),seed=RAIN_COLUMNS[(cycle+i*7)%RAIN_COLUMNS.length],x=2+((seed-2+p*windDx*Math.min(18,wind*.42)+60)%60);
       const tail=windDx>.2?1:windDx<-.2?-1:0, width=tail?-tail:1;
       const c0=bright([0,100,145]),c1=bright([0,68,105]),c2=bright([0,42,72]),c3=bright([0,28,52]);
       px(x,y,c0); px(x+width,y,c0);
@@ -265,7 +266,7 @@ function weatherParticles(now){
     }
   }
 }
-function targetGround(){if(!weather)return[null,0];const r=Math.max(weather.rain||0,weather.showers||0),s=weather.snow||0;if(s>0)return["snow",s<.3?4:s<1?12:21];if(r>0)return["rain",r<.3?2:r<1.5?10:32];return[null,0]}
+function targetGround(){if(!weather)return[null,0];const r=(weather.rain||0)+(weather.showers||0),s=weather.snow||0;if(s>0)return["snow",s<.3?4:s<1?12:21];if(r>0)return["rain",r<.3?2:r<1.5?10:32];return[null,0]}
 function updateGround(now){const [k,t]=targetGround();if(k&&k!==ground.kind){ground={kind:k,level:1,last:now};return}if(now-ground.last<(t>ground.level?30000:60000))return;if(t>ground.level)ground.level++;else if(t<ground.level){ground.level--;if(ground.level<=0)ground.kind=null}ground.last=now}
 function drawGround(now){
   updateGround(now);if(!ground.kind||ground.level<=0)return;
