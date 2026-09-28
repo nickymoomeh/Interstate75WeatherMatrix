@@ -1201,6 +1201,12 @@ WIND_DX_BY_SECTOR = (
 )
 LEAF_Y_WAVE = (0, 2, 4, 2, 0, -2, -4, -2)
 SNOW_FLUTTER = (0, 1, 2, 1, 0, -1, -2, -1)
+RAIN_COLUMNS = (
+    7, 43, 19, 56, 31, 11, 50, 24, 38, 4,
+    59, 16, 46, 28, 9, 35, 53, 21, 41, 13,
+    61, 26, 48, 6, 33, 18, 55, 29, 44, 2,
+    52,
+)
 
 
 def wind_dx_percent(direction):
@@ -1212,7 +1218,7 @@ def draw_weather_particles(data, now_ms):
     if not data.get("forecast_ok", False):
         return
 
-    rain_mm = max(safe_float(data.get("rain_mm")), safe_float(data.get("showers_mm")))
+    rain_mm = safe_float(data.get("rain_mm")) + safe_float(data.get("showers_mm"))
     snow_cm = safe_float(data.get("snowfall_cm"))
     wind_speed = safe_float(data.get("wind_speed_kmh"))
     wind_gust = safe_float(data.get("wind_gust_kmh"))
@@ -1230,9 +1236,11 @@ def draw_weather_particles(data, now_ms):
         tail_dx = 1 if wind_dx > 20 else -1 if wind_dx < -20 else 0
         width_dx = -tail_dx if tail_dx else 1
         for index in range(count):
-            phase_ms = (now_ms + index * 337) % cycle_ms
+            shifted_ms = now_ms + index * 337
+            phase_ms = shifted_ms % cycle_ms
             y = (phase_ms * 72) // cycle_ms - 5
-            seed_x = 3 + ((index * 19 + 7) % 58)
+            cycle_index = shifted_ms // cycle_ms
+            seed_x = RAIN_COLUMNS[(cycle_index + index * 7) % len(RAIN_COLUMNS)]
             drift_x = (phase_ms * drift_tenths) // (cycle_ms * 10)
             x = 2 + ((seed_x - 2 + drift_x) % 60)
             graphics.set_pen(cached_pen((0, 100, 145)))
@@ -1302,7 +1310,7 @@ def draw_weather_particles(data, now_ms):
 
 def precipitation_target(data):
     """Map the current Open-Meteo precipitation intensity to visual depth."""
-    rain_mm = max(safe_float(data.get("rain_mm")), safe_float(data.get("showers_mm")))
+    rain_mm = safe_float(data.get("rain_mm")) + safe_float(data.get("showers_mm"))
     snow_cm = safe_float(data.get("snowfall_cm"))
     if snow_cm > 0:
         return "snow", 4 if snow_cm < 0.3 else 12 if snow_cm < 1.0 else 21
@@ -1569,7 +1577,7 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
         graphics.set_pen(BLACK)
         graphics.rectangle(degree_x - 1, temp_y - 1, 4, 4)
         outline_pixel_text(DISPLAY_TEMPERATURE_UNIT, degree_x + 4, temp_y + 2, scale=1)
-        unit_rgb = tuple(int(channel * beam_fade) for channel in (120, 120, 120))
+        unit_rgb = tuple(int(channel * beam_fade) for channel in (85, 85, 85))
         unit_pen = make_pen(unit_rgb)
         graphics.set_pen(unit_pen)
         graphics.rectangle(degree_x, temp_y, 2, 2)
