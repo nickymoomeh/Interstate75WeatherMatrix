@@ -1,6 +1,6 @@
 # Interstate75WeatherMatrix
 
-A standalone 64×64 animated LED weather display for the **Pimoroni Interstate 75 W**.
+A standalone, configurable-width animated LED weather display for the **Pimoroni Interstate 75 W**.
 
 This project grew out of a sensor-backed home weather matrix that used a Raspberry Pi, InfluxDB and local 433 MHz/BMP280 weather sensors. This edition needs none of that infrastructure: the Interstate 75 W connects directly to Wi-Fi and retrieves its weather data from **Open-Meteo**.
 
@@ -32,7 +32,7 @@ The decorative animation runs locally at a target of eight frames per second. We
 ## Hardware
 
 - Pimoroni Interstate 75 W
-- 64×64 HUB75 RGB LED matrix
+- one or more horizontally chained 64×64 HUB75 RGB LED matrices
 - suitable 5 V power supply for the matrix
 
 The code targets Pimoroni's MicroPython build for the Interstate 75 W.
@@ -41,6 +41,8 @@ The code targets Pimoroni's MicroPython build for the Interstate 75 W.
 
 - `main.py` — display loop, rendering, animation and runtime state
 - `sprites.py` — static pixel artwork, colour palettes and animation-frame data
+- `ambient_motion.py` — compact UI drift, fish movement and packed font helpers
+- `network_recovery.py` — Wi-Fi recovery and periodic NTP scheduling
 - `weather_source.py` — Open-Meteo request and translation into the fields used by the display
 - `config.py` — normal user-editable settings such as location, timezone, temperature unit, clock format, refresh rate and brightness behaviour
 - `secrets.example.py` — safe Wi-Fi credentials template
@@ -61,6 +63,8 @@ Copy these files to the root of the Interstate 75 W filesystem:
 - `main.py`
 - `sprites.py`
 - `weather_source.py`
+- `network_recovery.py`
+- `ambient_motion.py`
 - `config.py`
 
 ### 3. Create `secrets.py`
@@ -95,7 +99,7 @@ America/New_York
 Australia/Sydney
 ```
 
-Open-Meteo returns the correct UTC offset for the requested timezone and the display uses that to convert NTP's UTC clock to local time. This means daylight-saving changes are not hard-coded to the UK.
+Open-Meteo returns the correct UTC offset for the requested timezone and the display uses that to convert NTP's UTC clock to local time. For Europe/London, local GMT/BST transition rules also keep DST correct while offline. Other timezones use the most recently received API offset.
 
 ### 5. Choose temperature and clock units if required
 
@@ -121,13 +125,26 @@ The bottom `MIN`/`MAX` readings normally keep one decimal place. In Fahrenheit m
 
 ### 6. Reboot
 
-On boot the display will:
+The animation loop starts even if Wi-Fi or NTP is unavailable. Wi-Fi retries automatically; NTP retries every five minutes after failures and approximately daily after success. Until the first successful NTP sync, the clock reads `--:--` while weather can still update.
 
-1. initialise the matrix;
-2. connect to Wi-Fi;
-3. synchronise its clock using NTP;
-4. request weather from Open-Meteo;
-5. begin the normal animated display.
+Set `SCREEN_COUNT = 1` in `config.py` for 64×64, or `SCREEN_COUNT = 2` for 128×64. Counts 1–4 select the matching Pimoroni display mode; unsupported firmware fails with a clear message. The driver configures the HUB75 output width as well as the framebuffer. Both panels must have compatible scan/driver requirements. Connect first-panel OUT to second-panel IN and power both appropriately. See [Pimoroni's Interstate75 implementation](https://github.com/pimoroni/pimoroni-pico/blob/main/micropython/modules_py/interstate75.py).
+
+Sprites and font sizes stay unchanged. Clock and humidity occupy opposite edges; the temperature and lower readings remain a centred cluster. Wider screens show more scenery. Each existing divider/platform grows from 60 to 108 pixels at two panels, centred with continuous rendering across the physical join. Wildlife can cross the physical join. Stars, precipitation, leaves and bubbles maintain density; the main bird and fish waits stay unchanged, while wider displays gain sparse additional actors and modestly more UFO opportunities. Shooting-star schedules stay unchanged.
+
+The upper bar turns red for lost Wi-Fi; the lower bar turns red for request failure, stale/no weather, or previous-day extrema. Normal seconds motion continues in both states. A failed request retains cached readings and retries after one minute; normal Open-Meteo refresh remains ten minutes. After thirty minutes without an update, cached readings are explicitly marked stale. Previous-day extrema become `--` after local midnight and refresh automatically after recovery.
+
+### Hardware checks
+
+1. Confirm the original layout with `SCREEN_COUNT = 1`.
+2. With `SCREEN_COUNT = 2`, confirm panel order, colours, scan alignment and brightness, and watch actors cross x=64.
+3. Check both platform bars, decimal min/max, rain/snow, ground coverage, night stars and warning edges.
+4. Disable Wi-Fi for at least ten minutes, then restore it: expect red upper bar, retained temperature, and recovery without reset.
+5. Block Internet/API access with Wi-Fi still connected: expect red lower bar and one-minute retries. Try booting with NTP unavailable, then restoring it.
+6. Cross midnight while offline: yesterday extrema must disappear and return with the new day's data after recovery. Check GMT/BST transitions.
+
+Network requests remain synchronous and may briefly pause frames. HTTP socket timeout is eight seconds and NTP timeout is two seconds; firmware DNS resolution may have its own timeout. Desktop tests cannot verify actual scan timing, Pico memory headroom, colour mapping or radio/DNS behaviour. Enable performance logging temporarily when testing two panels.
+
+Run off-device regression checks with `python tests/test_runtime.py`, and syntax-check with `python -m compileall -q .`. The browser emulator remains its existing single-panel demonstration.
 
 ## Configuration
 
@@ -143,6 +160,7 @@ WEATHER_REFRESH_SECONDS = 600
 TARGET_FRAME_MS = 125
 NIGHT_DIM_FACTOR = 0.35
 PERFORMANCE_LOGGING = False
+SCREEN_COUNT = 1
 ```
 
 The default weather refresh is **10 minutes**. Open-Meteo's weather values do not need to be queried at animation-frame speed.
@@ -220,3 +238,31 @@ The standalone build has been tested on a physical Interstate 75 W and 64×64 HU
 ## Licence
 
 MIT License.
+
+
+
+## Quiet-weather ambient improvements
+
+`AMBIENT_ACTIVITY = True` enables the optional activity; set it to False to keep one actor per family and disable fish surprises, clouds and surface visitors. Width chooses fixed small state pools automatically: one panel allows one bird/day creature, one UFO and one fish; wider displays allow up to three birds/day creatures, two UFOs and two fish. Artwork and palettes stay shared. Extra bird slots only spawn birds, so ducks and festive processions are not duplicated.
+
+The primary bird/day-creature gap remains 20–40 seconds after a visit. Extra bird slots wait 90–210 seconds and 180–420 seconds respectively, with distinct seeds. The primary fish gap remains 20–40 seconds; its second slot waits 110–240 seconds. Two-panel primary UFO waits are 24–48 seconds by day and 16–32 seconds at night, plus a sparse secondary slot (110–220 seconds by day, 70–140 seconds at night). These are independent gaps after visits, not guarantees of a fixed simultaneous population. More than one actor may overlap, but maximum populations should be rare. Existing crossing speeds/durations are retained apart from subtle fish movement changes.
+
+Most fish swim normally. Roughly a quarter of journeys may briefly slow, pause, accelerate or turn; turns mirror the sprite about its centre. A bounded lifetime prevents a repeatedly indecisive fish remaining indefinitely. Fish remain fully below the live waterline; they can pass another fish without sharing state. No collision/pathfinding system is added.
+
+One small shark fin or periscope may traverse the live water surface once water is at least eight pixels deep. Visits are scheduled 12–25 minutes apart while water remains eligible; approximately one in ten is a periscope. Both are dim background sprites rendered before the readings. Dry/shallow conditions cancel the event. No full shark or submarine sprite is allocated.
+
+Dry overcast/mostly cloudy daytime weather (WMO codes 2, 3, 45 or 48) can show one dim six-row cloud crossing slowly: a 2.5–5.5 minute wait on wider displays, 5–8 minutes on one panel. Clouds stop during rain, snow, storm warnings or nighttime and require available forecast conditions. Existing nighttime shooting stars already supply the rare night event, so no duplicate system was added.
+
+`WIND_LEAF_THRESHOLD_KMH = 5` allows occasional leaves in a light breeze. Effective wind remains max(speed, 0.65 × gust). For example, 5.4 km/h with 9.4 km/h gusts yields 6.1 km/h: this was below the old 8 km/h threshold. Winds between 5 and 8 now use a long idle gap; rain/snow still take precedence over leaves.
+
+### Static UI drift
+
+`UI_DRIFT_MINUTES = 15` moves by one pixel every fifteen minutes, starting at the normal centred position. Set 0 to disable. The clock and humidity form a header group moving within ±1 pixel because their edge margins are small. The temperature/unit, daily min/max labels/readings and pressure/storm icon form a central group moving within ±1 pixel at 64×64 and ±2 at 128×64 (capped at ±3 for larger configurations). Each group reverses smoothly; no centre reset or per-frame scrolling occurs. Platforms, warning borders, precipitation, wildlife, clouds and the abduction craft/beam stay in world coordinates. The abduction still operates over the small temperature region; its fixed beam easily covers the drift range.
+
+The former two-pixel seconds-bar gap was caused by explicit black rectangles drawn over x = WIDTH/2 − 1. Removing those cut-outs fixes the underlying cause; the original bar geometry and seconds-position calculation now render continuously.
+
+### Efficiency and validation
+
+Font rows are packed into horizontal runs once at boot (under 400 bytes of run payload per edition). Identical glyph pixels need about 36% fewer rectangle calls across the font inventory, and per-frame glyph-bit scanning is removed. This is a drawing-call saving, not a measured RP2350 frame-rate improvement. Actor pools are allocated once; no sprites/framebuffers are duplicated, and new movement uses small scalar state with fixed-point fish positions. Existing pen caches, frame pacing and network recovery remain.
+
+Desktop regression tests exercise 64/128/192/256 widths, concurrent actor state isolation, join crossing, fish pause/turn/exit, both surface events, cloud suppression, light-breeze leaves, drift extremes and timer wrap, continuous bars, and maximum-cast rain/water/stars scenes. Packed glyphs are pixel-equivalent to the old renderer. Actual RP2350 heap use, HUB75 transfer timing and sustained FPS still require hardware measurement: temporarily enable PERFORMANCE_LOGGING and watch free heap during a busy scene. Test single-panel layout, both drift extremes, quiet-weather clouds/leaves, simultaneous journeys, fish turns and rare surface visitors. The existing browser/desktop emulators remain single-panel demonstrations of the earlier behaviour.

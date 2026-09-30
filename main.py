@@ -1,4 +1,4 @@
-"""Standalone 64x64 weather matrix for the Pimoroni Interstate 75 W.
+"""Standalone horizontally chained weather matrix for the Pimoroni Interstate 75 W.
 
 The rendering and animation code is intentionally kept close to the original
 sensor-backed display so the standalone edition looks and behaves the same.
@@ -8,14 +8,20 @@ lives in sprites.py.
 Normal users should only need to edit config.py and create secrets.py.
 """
 
-from interstate75 import Interstate75, DISPLAY_INTERSTATE75_64X64, SWITCH_A
-import network
+from interstate75 import Interstate75, SWITCH_A
+import interstate75
 import time
-import ntptime
+from network_recovery import Recovery
+from ambient_motion import UIDrift, start_fish_motion, move_fish, CLOUD_ROWS, FIN_ROWS, compile_glyph_runs
 import gc
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
 from config import (
+    SCREEN_COUNT,
+    AMBIENT_ACTIVITY,
+    UI_DRIFT_MINUTES,
+    WIND_LEAF_THRESHOLD_KMH,
+    TIMEZONE,
     TEMPERATURE_UNIT,
     CLOCK_FORMAT,
     WEATHER_REFRESH_SECONDS,
@@ -59,15 +65,6 @@ LIGHTNING_PULSE_PERIOD_MS = 2400
 ACCUMULATION_STEP_MS = 30000
 ACCUMULATION_DRAIN_MS = 60000
 
-# Network/time resilience. Weather values remain on screen during a temporary
-# outage, but the divider/seconds bars turn red once the last successful
-# Open-Meteo update is 30 minutes old.
-WEATHER_STALE_SECONDS = 30 * 60
-NTP_BOOT_ATTEMPTS = 5
-NTP_BOOT_RETRY_SECONDS = 2
-NTP_RETRY_MS = 5 * 60 * 1000
-NTP_RESYNC_MS = 24 * 60 * 60 * 1000
-
 DISPLAY_TEMPERATURE_UNIT = str(TEMPERATURE_UNIT).upper()
 if DISPLAY_TEMPERATURE_UNIT not in ("C", "F"):
     raise ValueError('TEMPERATURE_UNIT must be "C" or "F"')
@@ -83,7 +80,25 @@ if DISPLAY_CLOCK_FORMAT not in (12, 24):
 # Display and runtime state
 # ---------------------------------------------------------------------------
 
-i75 = Interstate75(display=DISPLAY_INTERSTATE75_64X64)
+if type(SCREEN_COUNT) is not int or not 1 <= SCREEN_COUNT <= 4:
+    raise ValueError("SCREEN_COUNT must be an integer from 1 to 4")
+WIDTH = 64 * SCREEN_COUNT
+HEIGHT = 64
+try:
+    display_mode = getattr(interstate75, "DISPLAY_INTERSTATE75_{}X64".format(WIDTH))
+except AttributeError:
+    raise RuntimeError("Install Interstate75 firmware supporting {}x64".format(WIDTH))
+i75 = Interstate75(display=display_mode)
+if i75.display.get_bounds() != (WIDTH, HEIGHT):
+    raise RuntimeError("Unexpected framebuffer dimensions")
+# Preserve the 60-pixel single-panel platform; add scenery without full-width bars.
+BAR_WIDTH = 60 + (WIDTH - 64) * 3 // 4
+BAR_LEFT = (WIDTH - BAR_WIDTH) // 2
+UI_SHIFT = (WIDTH - 64) // 2
+UI_DRIFT = UIDrift(UI_DRIFT_MINUTES * 60000)
+BIRD_LIMIT = 3 if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY else 1
+UFO_LIMIT = 2 if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY else 1
+FISH_LIMIT = 2 if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY else 1
 graphics = i75.display
 
 BLACK = graphics.create_pen(0, 0, 0)
@@ -135,6 +150,17 @@ DAY_CREATURE = {
 }
 ABDUCTION = {"active": False, "start_ms": 0, "last_key": None, "colour": 0}
 FESTIVE_BUTTON = {"previous": False, "manual": None, "last_ms": 0}
+# Independent state only; sprites, palettes and framebuffer remain shared.
+BIRD_STATES = tuple(dict(DAY_CREATURE) for _ in range(BIRD_LIMIT))
+UFO_STATES = tuple(dict(UFO_STATE) for _ in range(UFO_LIMIT))
+FISH_STATES = tuple(dict(FISH_STATE) for _ in range(FISH_LIMIT))
+for pool in (BIRD_STATES, UFO_STATES, FISH_STATES):
+    for slot, state in enumerate(pool):
+        state["slot"] = slot
+DAY_CREATURE, UFO_STATE, FISH_STATE = BIRD_STATES[0], UFO_STATES[0], FISH_STATES[0]
+SURFACE_EVENT = {"active": False, "next_ms": 0, "start_ms": 0, "kind": "fin", "right": True}
+CLOUD_STATE = {"active": False, "next_ms": 0, "start_ms": 0, "right": True, "y": 6, "duration_ms": 45000}
+
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +420,8 @@ FONT = {
     " ": ["0", "0", "0", "0", "0"],
 }
 GLYPH_WIDTHS = {character: max(len(row) for row in glyph) for character, glyph in FONT.items()}
+# Packed once at boot: fewer driver calls and no repeated glyph-bit scanning.
+GLYPH_RUNS = compile_glyph_runs(FONT)
 
 ARROWS = {
     "rising_fast": [
@@ -435,13 +463,12 @@ def draw_pixel_text(text, x, y, pen, scale=1):
     text = str(text).upper()
     graphics.set_pen(pen)
     for index, character in enumerate(text):
-        glyph = FONT.get(character, FONT[" "])
-        glyph_width = GLYPH_WIDTHS.get(character, 1)
-        for row_i, row in enumerate(glyph):
-            for col_i, bit in enumerate(row):
-                if bit == "1":
-                    graphics.rectangle(cursor_x + col_i * scale, y + row_i * scale, scale, scale)
-        cursor_x += glyph_width * scale
+        runs = GLYPH_RUNS.get(character, GLYPH_RUNS[" "])
+        for run in range(0, len(runs), 3):
+            graphics.rectangle(cursor_x + runs[run + 1] * scale,
+                               y + runs[run] * scale,
+                               runs[run + 2] * scale, scale)
+        cursor_x += GLYPH_WIDTHS.get(character, 1) * scale
         if index < len(text) - 1:
             cursor_x += scale
 
@@ -468,50 +495,6 @@ def outline_bitmap(bitmap, x, y, thickness=1):
 # Wi-Fi and local time
 # ---------------------------------------------------------------------------
 
-def connect_wifi():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if wlan.isconnected():
-        print("Already connected:")
-        print(wlan.ifconfig())
-        return True
-
-    show_message("WiFi", "connecting")
-    print("Connecting to WiFi...")
-    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-
-    timeout = 25
-    while timeout > 0:
-        if wlan.isconnected():
-            print("Connected!")
-            print(wlan.ifconfig())
-            return True
-        print("Waiting for WiFi...")
-        time.sleep(1)
-        timeout -= 1
-
-    print("WiFi failed")
-    return False
-
-
-def sync_time(attempts=1, retry_seconds=0, show_status=True):
-    attempts = max(1, int(attempts))
-    for attempt in range(attempts):
-        try:
-            if show_status:
-                show_message("Syncing", "time")
-            ntptime.settime()
-            print("Time synced")
-            print(time.localtime())
-            return True
-        except Exception as error:
-            print("Time sync failed (attempt {}/{}):".format(attempt + 1, attempts))
-            print(error)
-            if attempt + 1 < attempts and retry_seconds > 0:
-                time.sleep(retry_seconds)
-    return False
-
-
 def set_weather_timezone_offset(data):
     """Adopt the UTC offset supplied for the configured Open-Meteo timezone."""
     try:
@@ -524,12 +507,84 @@ def set_weather_timezone_offset(data):
         LOCAL_TIME_CACHE["epoch_second"] = None
 
 
+DST_CACHE = {"year": None, "march": None, "october": None}
+
+def is_leap_year(year):
+    if year % 400 == 0:
+        return True
+    if year % 100 == 0:
+        return False
+    return year % 4 == 0
+
+
+def days_in_month(year, month):
+    if month in [1, 3, 5, 7, 8, 10, 12]:
+        return 31
+    if month in [4, 6, 9, 11]:
+        return 30
+    if is_leap_year(year):
+        return 29
+    return 28
+
+
+def day_of_week(year, month, day):
+    t = time.mktime((year, month, day, 0, 0, 0, 0, 0))
+    return time.localtime(t)[6]
+
+
+def last_sunday(year, month):
+    day = days_in_month(year, month)
+    while day > 0:
+        if day_of_week(year, month, day) == 6:
+            return day
+        day -= 1
+    return 31
+
+
+def uk_utc_offset_hours(utc=None):
+    if utc is None:
+        utc = time.localtime()
+    year = utc[0]
+    month = utc[1]
+    day = utc[2]
+    hour = utc[3]
+
+    if DST_CACHE["year"] != year:
+        DST_CACHE["year"] = year
+        DST_CACHE["march"] = last_sunday(year, 3)
+        DST_CACHE["october"] = last_sunday(year, 10)
+    march_change_day = DST_CACHE["march"]
+    october_change_day = DST_CACHE["october"]
+
+    if month < 3 or month > 10:
+        return 0
+    if month > 3 and month < 10:
+        return 1
+
+    if month == 3:
+        if day > march_change_day:
+            return 1
+        if day < march_change_day:
+            return 0
+        return 1 if hour >= 1 else 0
+
+    if month == 10:
+        if day < october_change_day:
+            return 1
+        if day > october_change_day:
+            return 0
+        return 0 if hour >= 1 else 1
+
+    return 0
+
+
 def update_local_time_cache(now_seconds=None):
     try:
         epoch_second = int(time.time() if now_seconds is None else now_seconds)
         if LOCAL_TIME_CACHE["epoch_second"] == epoch_second:
             return
-        local = time.localtime(epoch_second + LOCAL_TIME_CACHE["utc_offset_seconds"])
+        offset = uk_utc_offset_hours(time.localtime(epoch_second)) * 3600 if TIMEZONE == "Europe/London" else LOCAL_TIME_CACHE["utc_offset_seconds"]
+        local = time.localtime(epoch_second + offset)
         hour = local[3]
         minute = local[4]
         previous_epoch = LOCAL_TIME_CACHE["epoch_second"]
@@ -727,7 +782,7 @@ def draw_storm_warning(x, y, pen):
 
 def draw_divider_line(y, second, top=True, fault=False):
     second = clamp(safe_int(second), 0, 59)
-    x = 2 + second
+    x = BAR_LEFT + second * (BAR_WIDTH - 1) // 59
     if fault:
         base_rgb, edge_rgb, centre_rgb = (65, 0, 0), (95, 0, 0), (145, 0, 0)
     else:
@@ -736,12 +791,12 @@ def draw_divider_line(y, second, top=True, fault=False):
         centre_rgb = (0, 118, 132) if top else (138, 76, 0)
 
     graphics.set_pen(cached_pen(base_rgb))
-    graphics.rectangle(2, y, 60, 1)
+    graphics.rectangle(BAR_LEFT, y, BAR_WIDTH, 1)
     if not fault and is_festive_period():
         offset = 0 if top else 2
         for bulb in range(second + 1):
             graphics.set_pen(cached_pen(FESTIVE_COLOURS[(bulb + offset) % 4]))
-            graphics.pixel(2 + bulb, y)
+            graphics.pixel(BAR_LEFT + bulb * (BAR_WIDTH - 1) // 59, y)
         graphics.set_pen(cached_pen(FESTIVE_BRIGHT[(second + offset) % 4]))
         graphics.rectangle(x, y - 1, 1, 3)
         return
@@ -760,7 +815,7 @@ def star_seed(value):
 
 
 def draw_visible_pixel(x, y):
-    if 0 <= x < 64 and 0 <= y < 64:
+    if 0 <= x < WIDTH and 0 <= y < 64:
         graphics.pixel(int(x), int(y))
 
 
@@ -769,50 +824,60 @@ def schedule_shooting_star(now_ms):
     SHOOTING_STAR["next_ms"] = time.ticks_add(now_ms, 300000 + (seed % 300001))
 
 
-def schedule_ufo(now_ms, daylight=False):
-    seed = star_seed((now_ms // 1000) + 313)
-    wait_ms = 30000 + (seed % 30001) if daylight else 20000 + (seed % 20001)
-    UFO_STATE["next_ms"] = time.ticks_add(now_ms, wait_ms)
-    UFO_STATE["daylight"] = daylight
+def schedule_ufo(now_ms, daylight=False, state=None):
+    if state is None:
+        state = UFO_STATE
+    seed = star_seed((now_ms // 1000) + 313 + state["slot"] * 307)
+    slot = state["slot"]
+    if slot:
+        wait_ms = (110000 + seed % 110001) if daylight else (70000 + seed % 70001)
+    else:
+        wait_ms = 30000 + (seed % 30001) if daylight else 20000 + (seed % 20001)
+        if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY:
+            wait_ms = wait_ms * 4 // 5
+    state["next_ms"] = time.ticks_add(now_ms, wait_ms)
+    state["daylight"] = daylight
 
 
-def draw_ufo(now_ms, daylight=False):
-    if UFO_STATE["next_ms"] == 0 or (not UFO_STATE["active"] and UFO_STATE["daylight"] != daylight):
-        schedule_ufo(now_ms, daylight)
+def draw_ufo(now_ms, daylight=False, state=None):
+    if state is None:
+        state = UFO_STATE
+    if state["next_ms"] == 0 or (not state["active"] and state["daylight"] != daylight):
+        schedule_ufo(now_ms, daylight, state)
         return
-    if not UFO_STATE["active"]:
-        if time.ticks_diff(now_ms, UFO_STATE["next_ms"]) < 0:
+    if not state["active"]:
+        if time.ticks_diff(now_ms, state["next_ms"]) < 0:
             return
-        seed = star_seed((now_ms // 1000) + 719)
+        seed = star_seed((now_ms // 1000) + 719 + state["slot"] * 701)
         mode = (seed >> 3) % 3
-        UFO_STATE["active"] = True
-        UFO_STATE["start_ms"] = now_ms
-        UFO_STATE["right"] = bool(seed & 1)
-        UFO_STATE["y"] = 3 + ((seed >> 5) % 25)
-        UFO_STATE["festive"] = is_festive_period()
-        palette_size = len(FESTIVE_UFO_COLOURS) if UFO_STATE["festive"] else len(UFO_COLOURS)
-        UFO_STATE["colour"] = (seed >> 10) % palette_size
-        UFO_STATE["style"] = (seed >> 12) % len(UFO_WIDTHS)
-        UFO_STATE["mode"] = mode
-        UFO_STATE["duration_ms"] = (3800, 7200, 11500)[mode] + UFO_STATE["style"] * 650
-        UFO_STATE["hover_x"] = 17 + ((seed >> 13) % 30)
+        state["active"] = True
+        state["start_ms"] = now_ms
+        state["right"] = bool(seed & 1)
+        state["y"] = 3 + ((seed >> 5) % 25)
+        state["festive"] = is_festive_period()
+        palette_size = len(FESTIVE_UFO_COLOURS) if state["festive"] else len(UFO_COLOURS)
+        state["colour"] = (seed >> 10) % palette_size
+        state["style"] = (seed >> 12) % len(UFO_WIDTHS)
+        state["mode"] = mode
+        state["duration_ms"] = (3800, 7200, 11500)[mode] + state["style"] * 650
+        state["hover_x"] = 17 + ((seed >> 13) % (WIDTH - 34))
 
-    elapsed = time.ticks_diff(now_ms, UFO_STATE["start_ms"])
-    duration = UFO_STATE["duration_ms"]
+    elapsed = time.ticks_diff(now_ms, state["start_ms"])
+    duration = state["duration_ms"]
     if elapsed >= duration:
-        UFO_STATE["active"] = False
-        schedule_ufo(now_ms, daylight)
+        state["active"] = False
+        schedule_ufo(now_ms, daylight, state)
         return
 
-    direction = 1 if UFO_STATE["right"] else -1
-    style = UFO_STATE["style"]
+    direction = 1 if state["right"] else -1
+    style = state["style"]
     width = UFO_WIDTHS[style]
     start_x = -width
-    target_x = 63 + width
-    if UFO_STATE["mode"] == 2:
+    target_x = WIDTH - 1 + width
+    if state["mode"] == 2:
         enter_ms = 3000
         leave_ms = 3000
-        hover_x = UFO_STATE["hover_x"]
+        hover_x = state["hover_x"]
         if elapsed < enter_ms:
             edge_x = start_x if direction > 0 else target_x
             x = edge_x + direction * ((abs(hover_x - edge_x) * elapsed) // enter_ms)
@@ -823,14 +888,14 @@ def draw_ufo(now_ms, daylight=False):
             leave_elapsed = elapsed - (duration - leave_ms)
             x = hover_x + direction * ((abs(leave_x - hover_x) * leave_elapsed) // leave_ms)
     else:
-        journey = 64 + width * 2
+        journey = WIDTH + width * 2
         x = start_x + (elapsed * journey) // duration if direction > 0 else target_x - (elapsed * journey) // duration
 
-    y = UFO_STATE["y"] + UFO_BOB[(elapsed // 300) % len(UFO_BOB)]
-    colours = FESTIVE_UFO_COLOURS if UFO_STATE["festive"] else UFO_COLOURS
-    dim_lights = FESTIVE_UFO_DIM_LIGHTS if UFO_STATE["festive"] else UFO_DIM_LIGHTS
-    day_lights = FESTIVE_UFO_DAY_LIGHTS if UFO_STATE["festive"] else UFO_DAY_LIGHTS
-    body, lights = colours[UFO_STATE["colour"]]
+    y = state["y"] + UFO_BOB[(elapsed // 300) % len(UFO_BOB)]
+    colours = FESTIVE_UFO_COLOURS if state["festive"] else UFO_COLOURS
+    dim_lights = FESTIVE_UFO_DIM_LIGHTS if state["festive"] else UFO_DIM_LIGHTS
+    day_lights = FESTIVE_UFO_DAY_LIGHTS if state["festive"] else UFO_DAY_LIGHTS
+    body, lights = colours[state["colour"]]
     graphics.set_pen(cached_pen((90, 90, 105)))
     for dx, dy in UFO_DOMES[style]:
         draw_visible_pixel(x + dx, y + dy)
@@ -840,15 +905,15 @@ def draw_ufo(now_ms, daylight=False):
             draw_visible_pixel(x + dx, y + dy)
     light_y = UFO_LIGHT_Y[style]
     light_phase = (elapsed // 375) % 3
-    graphics.set_pen(cached_pen(dim_lights[UFO_STATE["colour"]]))
+    graphics.set_pen(cached_pen(dim_lights[state["colour"]]))
     for dx in UFO_LIGHTS[style]:
         draw_visible_pixel(x + dx, y + light_y)
-    active_lights = day_lights[UFO_STATE["colour"]] if daylight else lights
+    active_lights = day_lights[state["colour"]] if daylight else lights
     graphics.set_pen(cached_pen(active_lights))
     for lamp_index, dx in enumerate(UFO_LIGHTS[style]):
         if (lamp_index + light_phase) % 3 == 0:
             draw_visible_pixel(x + dx, y + light_y)
-    if UFO_STATE["mode"] == 2 and 3000 <= elapsed < duration - 3000 and (elapsed // 700) % 2 == 0:
+    if state["mode"] == 2 and 3000 <= elapsed < duration - 3000 and (elapsed // 700) % 2 == 0:
         graphics.set_pen(cached_pen((24, 38, 42)))
         centre_x = width // 2
         beam_y = UFO_BEAM_Y[style]
@@ -856,9 +921,14 @@ def draw_ufo(now_ms, daylight=False):
         draw_visible_pixel(x + centre_x, y + beam_y + 1)
 
 
-def schedule_day_creature(now_ms):
-    seed = star_seed((now_ms // 1000) + 911)
-    DAY_CREATURE["next_ms"] = time.ticks_add(now_ms, 20000 + (seed % 20001))
+def schedule_day_creature(now_ms, state=None):
+    if state is None:
+        state = DAY_CREATURE
+    seed = star_seed((now_ms // 1000) + 911 + state["slot"] * 503)
+    wait_ms = 20000 + seed % 20001
+    if state["slot"]:
+        wait_ms = (90000 + seed % 120001) * state["slot"]
+    state["next_ms"] = time.ticks_add(now_ms, wait_ms)
 
 
 def draw_large_bird_pixels(pixels, x, y, right, pen):
@@ -958,7 +1028,7 @@ def draw_festive_procession(x, y, right, elapsed):
 
 def day_creature_motion(elapsed, duration, origin_right, turnaround):
     if not turnaround:
-        return (elapsed * 82) // duration, origin_right, False
+        return (elapsed * (WIDTH + 18)) // duration, origin_right, False
     phase = (elapsed * 1000) // duration
     if phase < 300:
         progress = (phase * 35) // 300
@@ -970,92 +1040,94 @@ def day_creature_motion(elapsed, duration, origin_right, turnaround):
         progress = 45 - ((phase - 600) * 10) // 150
     else:
         progress = max(0, 35 - ((phase - 750) * 35) // 250)
-    return progress, origin_right if phase < 525 else not origin_right, 450 <= phase < 600
+    return progress * (WIDTH + 18) // 82, origin_right if phase < 525 else not origin_right, 450 <= phase < 600
 
 
-def draw_day_creature(data, now_ms, second, data_fault=False):
+def draw_day_creature(data, now_ms, second, data_fault=False, state=None):
+    if state is None:
+        state = DAY_CREATURE
     daylight = is_daylight(data)
     festive = is_festive_period()
     if not daylight and not festive:
-        DAY_CREATURE["active"] = False
-        DAY_CREATURE["next_ms"] = 0
+        state["active"] = False
+        state["next_ms"] = 0
         return
-    if not daylight and DAY_CREATURE["active"] and DAY_CREATURE["kind"] != "santa":
-        DAY_CREATURE["active"] = False
-        schedule_day_creature(now_ms)
+    if not daylight and state["active"] and state["kind"] != "santa":
+        state["active"] = False
+        schedule_day_creature(now_ms, state)
         return
-    if DAY_CREATURE["next_ms"] == 0:
-        schedule_day_creature(now_ms)
+    if state["next_ms"] == 0:
+        schedule_day_creature(now_ms, state)
         return
-    if not DAY_CREATURE["active"]:
-        if time.ticks_diff(now_ms, DAY_CREATURE["next_ms"]) < 0:
+    if not state["active"]:
+        if time.ticks_diff(now_ms, state["next_ms"]) < 0:
             return
-        seed = star_seed((now_ms // 1000) + 1237)
-        perches = [16, 42, 63]
+        seed = star_seed((now_ms // 1000) + 1237 + state["slot"] * 809)
+        perches = (16, 42, 63)
         if GROUND_STATE["level"]:
             surface = 64 - GROUND_STATE["level"]
-            perches = [perch for perch in perches if perch < surface]
-        santa_visit = festive and ((seed >> 21) & 7) == 0
+            perches = (16, 42) if surface > 42 else (16,)
+        santa_visit = state["slot"] == 0 and festive and ((seed >> 21) & 7) == 0
         if not daylight and not santa_visit:
-            schedule_day_creature(now_ms)
+            schedule_day_creature(now_ms, state)
             return
-        duck_visit = daylight and not santa_visit and (seed & 7) == 0
-        DAY_CREATURE["active"] = True
-        DAY_CREATURE["start_ms"] = now_ms
-        DAY_CREATURE["kind"] = "santa" if santa_visit else ("duck" if duck_visit else "bird")
-        DAY_CREATURE["species"] = (seed >> 4) % len(BIRD_COLOURS)
-        DAY_CREATURE["perch"] = 16 if (duck_visit or santa_visit) else perches[(seed >> 7) % len(perches)]
-        DAY_CREATURE["right"] = bool(seed & 1)
-        DAY_CREATURE["duration_ms"] = (14000 + ((seed >> 11) % 4001)) if santa_visit else ((12000 + ((seed >> 11) % 4001)) if duck_visit else (7000 + ((seed >> 11) % 5001)))
+        duck_visit = state["slot"] == 0 and daylight and not santa_visit and (seed & 7) == 0
+        state["active"] = True
+        state["start_ms"] = now_ms
+        state["kind"] = "santa" if santa_visit else ("duck" if duck_visit else "bird")
+        state["species"] = (seed >> 4) % len(BIRD_COLOURS)
+        state["perch"] = 16 if (duck_visit or santa_visit) else perches[(seed >> 7) % len(perches)]
+        state["right"] = bool(seed & 1)
+        state["duration_ms"] = (14000 + ((seed >> 11) % 4001)) if santa_visit else ((12000 + ((seed >> 11) % 4001)) if duck_visit else (7000 + ((seed >> 11) % 5001)))
         interaction_roll = (seed >> 16) % 6
-        DAY_CREATURE["interact"] = not duck_visit and not santa_visit and interaction_roll < 2
-        DAY_CREATURE["interaction_done"] = False
-        DAY_CREATURE["interaction_start_ms"] = 0
-        DAY_CREATURE["turnaround"] = False if (duck_visit or santa_visit) else ((seed >> 19) & 3) == 0
+        state["interact"] = not duck_visit and not santa_visit and interaction_roll < 2
+        state["interaction_done"] = False
+        state["interaction_start_ms"] = 0
+        state["turnaround"] = False if (duck_visit or santa_visit) else ((seed >> 19) & 3) == 0
 
-    raw_elapsed = time.ticks_diff(now_ms, DAY_CREATURE["start_ms"])
+    raw_elapsed = time.ticks_diff(now_ms, state["start_ms"])
     hold_ms = 900
-    interaction_age = time.ticks_diff(now_ms, DAY_CREATURE["interaction_start_ms"])
-    held_ms = clamp(interaction_age, 0, hold_ms) if DAY_CREATURE["interaction_done"] else 0
+    interaction_age = time.ticks_diff(now_ms, state["interaction_start_ms"])
+    held_ms = clamp(interaction_age, 0, hold_ms) if state["interaction_done"] else 0
     elapsed = raw_elapsed - held_ms
-    duration = DAY_CREATURE["duration_ms"]
+    duration = state["duration_ms"]
     if elapsed >= duration:
-        DAY_CREATURE["active"] = False
-        schedule_day_creature(now_ms)
+        state["active"] = False
+        schedule_day_creature(now_ms, state)
         return
 
-    if DAY_CREATURE["kind"] == "duck":
-        progress = (elapsed * (64 + DUCK_FAMILY_WIDTH)) // duration
-        x = -DUCK_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else 64 - progress
-        draw_duck_family(x, 8, DAY_CREATURE["right"], elapsed)
+    if state["kind"] == "duck":
+        progress = (elapsed * (WIDTH + DUCK_FAMILY_WIDTH)) // duration
+        x = -DUCK_FAMILY_WIDTH + progress if state["right"] else WIDTH - progress
+        draw_duck_family(x, 8, state["right"], elapsed)
         return
-    if DAY_CREATURE["kind"] == "santa":
-        progress = (elapsed * (64 + FESTIVE_FAMILY_WIDTH)) // duration
-        x = -FESTIVE_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else 64 - progress
-        draw_festive_procession(x, 6, DAY_CREATURE["right"], elapsed)
+    if state["kind"] == "santa":
+        progress = (elapsed * (WIDTH + FESTIVE_FAMILY_WIDTH)) // duration
+        x = -FESTIVE_FAMILY_WIDTH + progress if state["right"] else WIDTH - progress
+        draw_festive_procession(x, 6, state["right"], elapsed)
         return
 
     progress, right, stopped = day_creature_motion(
-        elapsed, duration, DAY_CREATURE["right"], DAY_CREATURE["turnaround"]
+        elapsed, duration, state["right"], state["turnaround"]
     )
-    x = -18 + progress if DAY_CREATURE["right"] else 64 - progress
-    perch = DAY_CREATURE["perch"]
+    x = -18 + progress if state["right"] else WIDTH - progress
+    perch = state["perch"]
     hop = 0 if stopped else (0, 0, -1, -2, -1, 0, 0, 0)[(elapsed // 150) % 8]
     front_x = x + 16 if right else x
     if (
-        DAY_CREATURE["interact"]
-        and not DAY_CREATURE["interaction_done"]
+        state["interact"]
+        and not state["interaction_done"]
         and not data_fault
         and perch in (16, 42)
-        and abs(front_x - (2 + second)) <= 2
+        and abs(front_x - (BAR_LEFT + second * (BAR_WIDTH - 1) // 59)) <= 2
     ):
-        DAY_CREATURE["interaction_done"] = True
-        DAY_CREATURE["interaction_start_ms"] = now_ms
+        state["interaction_done"] = True
+        state["interaction_start_ms"] = now_ms
         interaction_age = 0
 
-    interacting = DAY_CREATURE["interaction_done"] and 0 <= interaction_age < hold_ms
+    interacting = state["interaction_done"] and 0 <= interaction_age < hold_ms
     y = perch - 14 + hop
-    body, breast, wing, beak = BIRD_COLOURS[DAY_CREATURE["species"]]
+    body, breast, wing, beak = BIRD_COLOURS[state["species"]]
     peck_down = interacting and ((interaction_age // 225) & 1) == 0
     draw_large_bird_pixels(BIRD_PECK_BODY if peck_down else BIRD_BODY, x, y, right, cached_pen(body))
     breast_pixels = ((6,4),(7,4),(6,5),(7,5)) if peck_down else ((5,2),(6,2),(5,3),(5,4))
@@ -1108,11 +1180,11 @@ def draw_abduction(now_ms):
         return
     elapsed = time.ticks_diff(now_ms, ABDUCTION["start_ms"])
     if elapsed < 1500:
-        x = -23 + (45 * elapsed // 1500)
+        x = -23 + ((45 + UI_SHIFT) * elapsed // 1500)
     elif elapsed < 9000:
-        x = 22
+        x = UI_SHIFT + 22
     else:
-        x = 22 + (48 * (elapsed - 9000) // 1500)
+        x = UI_SHIFT + 22 + ((WIDTH - UI_SHIFT - 16) * (elapsed - 9000) // 1500)
     y = 17 + UFO_BOB[(elapsed // 260) % len(UFO_BOB)]
     colour_index = ABDUCTION["colour"]
     dome, body, lights, beam = ABDUCTION_COLOURS[colour_index]
@@ -1123,7 +1195,7 @@ def draw_abduction(now_ms):
         for by in range(22, 42):
             half = min(10, (by - 21) // 2)
             if (by + beam_phase) % 3 == 0:
-                for bx in range(31 - half, 32 + half):
+                for bx in range(UI_SHIFT + 31 - half, UI_SHIFT + 32 + half):
                     if (bx + by) % 2 == 0:
                         draw_visible_pixel(bx, by)
     graphics.set_pen(cached_pen(dome))
@@ -1147,11 +1219,11 @@ def draw_night_sky(data, now_ms):
         SHOOTING_STAR["next_ms"] = 0
         return
 
-    for index in range(16):
+    for index in range(16 * SCREEN_COUNT):
         cadence = 23000 + index * 3700
         epoch = now_ms // cadence
         seed = star_seed(epoch + index * 101)
-        x = 2 + (seed % 60)
+        x = 2 + (seed % (WIDTH - 4))
         y = 1 + ((seed >> 7) % 59)
         period = 2600 + index * 310
         phase = (now_ms + index * 557) % period
@@ -1184,8 +1256,8 @@ def draw_night_sky(data, now_ms):
         SHOOTING_STAR["active"] = False
         schedule_shooting_star(now_ms)
         return
-    travel = (elapsed * 70) // 2000
-    x = -3 + travel if SHOOTING_STAR["right"] else 66 - travel
+    travel = (elapsed * (WIDTH + 6)) // 2000
+    x = -3 + travel if SHOOTING_STAR["right"] else WIDTH + 2 - travel
     direction = 1 if SHOOTING_STAR["right"] else -1
     y = SHOOTING_STAR["y"] + travel // 12
     for index, colour in enumerate(((110, 110, 120), (65, 70, 82), (32, 38, 50))):
@@ -1235,14 +1307,14 @@ def draw_weather_particles(data, now_ms):
         drift_tenths = (wind_dx * min(180, int(effective_wind * 4.2))) // 100
         tail_dx = 1 if wind_dx > 20 else -1 if wind_dx < -20 else 0
         width_dx = -tail_dx if tail_dx else 1
-        for index in range(count):
+        for index in range(count * SCREEN_COUNT):
             shifted_ms = now_ms + index * 337
             phase_ms = shifted_ms % cycle_ms
             y = (phase_ms * 72) // cycle_ms - 5
             cycle_index = shifted_ms // cycle_ms
-            seed_x = RAIN_COLUMNS[(cycle_index + index * 7) % len(RAIN_COLUMNS)]
+            seed_x = RAIN_COLUMNS[(cycle_index + index * 7) % len(RAIN_COLUMNS)] + (index % SCREEN_COUNT) * 64
             drift_x = (phase_ms * drift_tenths) // (cycle_ms * 10)
-            x = 2 + ((seed_x - 2 + drift_x) % 60)
+            x = 2 + ((seed_x - 2 + drift_x) % (WIDTH - 4))
             graphics.set_pen(cached_pen((0, 100, 145)))
             draw_visible_pixel(x, y)
             draw_visible_pixel(x + width_dx, y)
@@ -1261,13 +1333,13 @@ def draw_weather_particles(data, now_ms):
         count = 3 if snow_cm < 0.3 else 5
         cycle_ms = 5200
         drift_tenths = (wind_dx * min(220, int(effective_wind * 5.5))) // 100
-        for index in range(count):
+        for index in range(count * SCREEN_COUNT):
             phase_ms = (now_ms + index * 911) % cycle_ms
             y = (phase_ms * 70) // cycle_ms - 3
-            seed_x = 3 + ((index * 23 + 11) % 58)
+            seed_x = 3 + ((index * 23 + 11) % (WIDTH - 6))
             drift_x = (phase_ms * drift_tenths) // (cycle_ms * 10)
             wave_index = ((phase_ms * 8) // cycle_ms + index) % 8
-            x = 2 + ((seed_x - 2 + drift_x + SNOW_FLUTTER[wave_index]) % 60)
+            x = 2 + ((seed_x - 2 + drift_x + SNOW_FLUTTER[wave_index]) % (WIDTH - 4))
             side_dx = 1 if wave_index < 4 else -1
             graphics.set_pen(cached_pen((92, 110, 125)))
             draw_visible_pixel(x, y)
@@ -1279,20 +1351,20 @@ def draw_weather_particles(data, now_ms):
             draw_visible_pixel(x, y + 1)
         return
 
-    if effective_wind >= 8:
+    if effective_wind >= WIND_LEAF_THRESHOLD_KMH:
         leaf_count = 1 if effective_wind < 20 else 2 if effective_wind < 40 else 4
         travel_ms = max(3600, 7600 - int(effective_wind * 65))
-        interval_ms = travel_ms + 3000
+        interval_ms = travel_ms + (18000 if effective_wind < 8 else 3000)
         travels_right = wind_dx >= 0
-        for index in range(leaf_count):
+        for index in range(leaf_count * SCREEN_COUNT):
             phase_ms = (now_ms + index * 1900) % interval_ms
             if phase_ms >= travel_ms:
                 continue
             if travels_right:
-                x = -3 + (phase_ms * 70) // travel_ms
+                x = -3 + (phase_ms * (WIDTH + 6)) // travel_ms
                 tip_dx = 1
             else:
-                x = 66 - (phase_ms * 70) // travel_ms
+                x = WIDTH + 2 - (phase_ms * (WIDTH + 6)) // travel_ms
                 tip_dx = -1
             wave_index = ((phase_ms * 8) // travel_ms + index) % 8
             y = 18 + ((index * 13) % 28) + LEAF_Y_WAVE[wave_index]
@@ -1359,11 +1431,11 @@ def draw_ground_accumulation(data, now_ms):
     if kind == "snow":
         bank = (0, 1, 0, 0, 1, 1, 0, 1)
         graphics.set_pen(cached_pen((54, 68, 82)))
-        for x in range(64):
+        for x in range(WIDTH):
             height = min(21, level + bank[(x // 4) % len(bank)])
             graphics.rectangle(x, 64 - height, 1, height)
         graphics.set_pen(cached_pen((112, 125, 134)))
-        for x in range(64):
+        for x in range(WIDTH):
             height = min(21, level + bank[(x // 4) % len(bank)])
             draw_visible_pixel(x, 64 - height)
         return
@@ -1377,16 +1449,16 @@ def draw_ground_accumulation(data, now_ms):
         if band_height <= 0:
             continue
         graphics.set_pen(cached_pen(water_colours[band]))
-        graphics.rectangle(0, surface_y + band_start, 64, band_height)
+        graphics.rectangle(0, surface_y + band_start, WIDTH, band_height)
     graphics.set_pen(cached_pen((0, 72, 102)))
-    graphics.rectangle(0, surface_y, 64, 1)
+    graphics.rectangle(0, surface_y, WIDTH, 1)
 
     wind_dx = wind_dx_percent(data.get("wind_direction_deg"))
     for ripple in range(2):
         phase = (now_ms + ripple * 1900) % 4400
         if phase >= 2100:
             continue
-        centre = (18, 45)[ripple] + (wind_dx * phase) // 21000
+        centre = (18, 45)[ripple] * WIDTH // 64 + (wind_dx * phase) // 21000
         radius = 1 + (phase * 10) // 2100
         graphics.set_pen(cached_pen((0, 105, 132)))
         for side in (-1, 1):
@@ -1400,11 +1472,11 @@ def draw_ground_accumulation(data, now_ms):
 
     if level >= 6:
         bubble_span = max(2, level - 2)
-        for bubble in range(min(7, 2 + level // 5)):
+        for bubble in range(min(7, 2 + level // 5) * SCREEN_COUNT):
             cycle = 2600 + bubble * 370
             phase = (now_ms + bubble * 641) % cycle
             rise = (phase * bubble_span) // cycle
-            bx = 4 + ((bubble * 17 + 9) % 56) + UFO_BOB[(phase // 300 + bubble) % len(UFO_BOB)]
+            bx = 4 + ((bubble * 17 + 9 + (bubble % SCREEN_COUNT) * 64) % (WIDTH - 8)) + UFO_BOB[(phase // 300 + bubble) % len(UFO_BOB)]
             by = 62 - rise
             graphics.set_pen(cached_pen((20, 88, 112) if bubble % 3 else (34, 112, 138)))
             draw_visible_pixel(bx, by)
@@ -1417,59 +1489,65 @@ def fish_seed(now_ms):
     return (seed * 1103515245 + 12345) & 0x7FFFFFFF
 
 
-def schedule_next_fish(now_ms):
-    seed = fish_seed(now_ms)
-    FISH_STATE["next_ms"] = time.ticks_add(now_ms, 20000 + (seed % 20001))
+def schedule_next_fish(now_ms, state=None):
+    if state is None:
+        state = FISH_STATE
+    seed = fish_seed(now_ms + state["slot"] * 997)
+    wait_ms = 20000 + seed % 20001 if not state["slot"] else 110000 + seed % 130001
+    state["next_ms"] = time.ticks_add(now_ms, wait_ms)
 
 
-def draw_flood_fish(now_ms):
+def draw_flood_fish(now_ms, state=None):
+    if state is None:
+        state = FISH_STATE
     if GROUND_STATE["kind"] != "rain" or GROUND_STATE["level"] < 8:
-        FISH_STATE["active"] = False
-        FISH_STATE["next_ms"] = 0
+        state["active"] = False
+        state["next_ms"] = 0
         return
 
     surface_y = 64 - GROUND_STATE["level"]
     min_y = surface_y + 1
-    if FISH_STATE["active"] and FISH_STATE["y"] < min_y:
-        FISH_STATE["y"] = min_y
-    if FISH_STATE["next_ms"] == 0:
-        schedule_next_fish(now_ms)
+    if state["active"] and state["y"] < min_y:
+        state["y"] = min_y
+    if state["next_ms"] == 0:
+        schedule_next_fish(now_ms, state)
         return
-    if not FISH_STATE["active"]:
-        if time.ticks_diff(now_ms, FISH_STATE["next_ms"]) < 0:
+    if not state["active"]:
+        if time.ticks_diff(now_ms, state["next_ms"]) < 0:
             return
-        seed = fish_seed(now_ms)
+        seed = fish_seed(now_ms + state["slot"] * 1291)
         species = (seed >> 7) % len(FISH_WIDTHS)
         fish_height = FISH_HEIGHTS[species]
+        if min_y + fish_height > HEIGHT:
+            schedule_next_fish(now_ms, state)
+            return
         y_span = max(1, (64 - fish_height) - min_y + 1)
-        FISH_STATE["active"] = True
-        FISH_STATE["start_ms"] = now_ms
-        FISH_STATE["right"] = bool(seed & 1)
-        FISH_STATE["y"] = min_y + ((seed >> 3) % y_span)
-        FISH_STATE["species"] = species
-        FISH_STATE["colour"] = (seed >> 11) % len(FISH_COLOURS)
-        FISH_STATE["travel_ms"] = (7600, 9800, 12400)[species] + ((seed >> 15) % 1800)
+        state["active"] = True
+        state["start_ms"] = now_ms
+        state["right"] = bool(seed & 1)
+        state["y"] = min_y + ((seed >> 3) % y_span)
+        state["species"] = species
+        state["colour"] = (seed >> 11) % len(FISH_COLOURS)
+        state["travel_ms"] = (7600, 9800, 12400)[species] + ((seed >> 15) % 1800)
+        start_fish_motion(state, now_ms, WIDTH, FISH_WIDTHS[species])
+        if not AMBIENT_ACTIVITY:
+            state["quirky"] = False
 
-    travel_ms = FISH_STATE["travel_ms"]
-    elapsed_ms = time.ticks_diff(now_ms, FISH_STATE["start_ms"])
-    if elapsed_ms >= travel_ms:
-        FISH_STATE["active"] = False
-        schedule_next_fish(now_ms)
-        return
-
-    species = FISH_STATE["species"]
+    elapsed_ms = time.ticks_diff(now_ms, state["start_ms"])
+    species = state["species"]
     width = FISH_WIDTHS[species]
     height = FISH_HEIGHTS[species]
-    journey = 64 + width * 2
-    if FISH_STATE["right"]:
-        x = -width + (elapsed_ms * journey) // travel_ms
-        direction = 1
-    else:
-        x = 63 + width - (elapsed_ms * journey) // travel_ms
-        direction = -1
+    # Keep the entire sprite submerged as the water drains.
+    state["y"] = clamp(state["y"], min_y, HEIGHT - height)
+    centre, direction, finished = move_fish(state, now_ms, WIDTH, width)
+    if finished:
+        state["active"] = False
+        schedule_next_fish(now_ms, state)
+        return
+    x = centre - direction * (width // 2)
 
-    y = FISH_STATE["y"]
-    graphics.set_pen(cached_pen(FISH_COLOURS[FISH_STATE["colour"]]))
+    y = state["y"]
+    graphics.set_pen(cached_pen(FISH_COLOURS[state["colour"]]))
     middle = height // 2
     for dy in range(height):
         distance = abs(middle - dy)
@@ -1479,7 +1557,7 @@ def draw_flood_fish(now_ms):
             draw_visible_pixel(x + direction * dx, y + dy)
 
     tail_shift = FISH_TAIL_SHIFT[(elapsed_ms // 375) % len(FISH_TAIL_SHIFT)]
-    graphics.set_pen(cached_pen(FISH_ACCENTS[FISH_STATE["colour"]]))
+    graphics.set_pen(cached_pen(FISH_ACCENTS[state["colour"]]))
     for dx, dy in ((0, 0), (1, 1), (2, middle), (1, height - 2), (0, height - 1)):
         if dx < 2:
             dy = clamp(dy + tail_shift, 0, height - 1)
@@ -1494,6 +1572,91 @@ def draw_flood_fish(now_ms):
     draw_visible_pixel(x + direction * (width - 3), y + middle)
 
 
+def draw_clouds(data, now_ms):
+    """One dim, slow cloud on dry overcast days; never a second weather layer."""
+    quiet = (safe_float(data.get("rain_mm")) + safe_float(data.get("showers_mm")) <= 0
+             and safe_float(data.get("snowfall_cm")) <= 0
+             and not data.get("storm_warning", False))
+    code = safe_int(data.get("weather_code"), -1)
+    cloud_cover = safe_float(data.get("cloud_cover"), -1)
+    cloudy = data.get("forecast_ok", False) and (code in (2, 3, 45, 48) or cloud_cover >= 65)
+    if not AMBIENT_ACTIVITY or not quiet or not cloudy or not is_daylight(data):
+        CLOUD_STATE["active"] = False
+        CLOUD_STATE["next_ms"] = 0
+        return
+    if CLOUD_STATE["next_ms"] == 0:
+        roll = star_seed(now_ms // 1000 + 1999)
+        wait = (150000 if SCREEN_COUNT > 1 else 300000) + roll % 180001
+        CLOUD_STATE["next_ms"] = time.ticks_add(now_ms, wait)
+        return
+    if not CLOUD_STATE["active"]:
+        if time.ticks_diff(now_ms, CLOUD_STATE["next_ms"]) < 0:
+            return
+        roll = star_seed(now_ms // 100 + 2137)
+        CLOUD_STATE["active"] = True
+        CLOUD_STATE["start_ms"] = now_ms
+        CLOUD_STATE["right"] = bool(roll & 1)
+        CLOUD_STATE["y"] = 6 + ((roll >> 3) % 25)
+        # Keep cloud speed gentle even on a wider display.
+        CLOUD_STATE["duration_ms"] = (WIDTH + 46) * (380 + ((roll >> 7) % 151))
+    elapsed = time.ticks_diff(now_ms, CLOUD_STATE["start_ms"])
+    duration = CLOUD_STATE["duration_ms"]
+    if elapsed >= duration:
+        CLOUD_STATE["active"] = False
+        CLOUD_STATE["next_ms"] = 0
+        return
+    progress = elapsed * (WIDTH + 46) // duration
+    x = -23 + progress if CLOUD_STATE["right"] else WIDTH + 23 - progress
+    graphics.set_pen(cached_pen((19, 23, 28)))
+    for dy, (left, right) in enumerate(CLOUD_ROWS):
+        graphics.rectangle(x + left, CLOUD_STATE["y"] + dy, right - left + 1, 1)
+
+
+def draw_surface_event(now_ms):
+    """Rare fin/periscope; shares one small state and tracks the live surface."""
+    if not AMBIENT_ACTIVITY or GROUND_STATE["kind"] != "rain" or GROUND_STATE["level"] < 8:
+        SURFACE_EVENT["active"] = False
+        SURFACE_EVENT["next_ms"] = 0
+        return
+    if SURFACE_EVENT["next_ms"] == 0:
+        roll = star_seed(now_ms // 1000 + 3181)
+        SURFACE_EVENT["next_ms"] = time.ticks_add(now_ms, 720000 + roll % 780001)
+        SURFACE_EVENT["kind"] = "periscope" if ((roll >> 8) % 10) == 0 else "fin"
+        return
+    if not SURFACE_EVENT["active"]:
+        if time.ticks_diff(now_ms, SURFACE_EVENT["next_ms"]) < 0:
+            return
+        SURFACE_EVENT["active"] = True
+        SURFACE_EVENT["start_ms"] = now_ms
+        SURFACE_EVENT["right"] = bool(star_seed(now_ms // 100) & 1)
+    elapsed = time.ticks_diff(now_ms, SURFACE_EVENT["start_ms"])
+    duration = (WIDTH + 24) * 150
+    if elapsed >= duration:
+        SURFACE_EVENT["active"] = False
+        SURFACE_EVENT["next_ms"] = 0
+        return
+    progress = elapsed * (WIDTH + 24) // duration
+    x = -12 + progress if SURFACE_EVENT["right"] else WIDTH + 12 - progress
+    direction = 1 if SURFACE_EVENT["right"] else -1
+    surface = HEIGHT - GROUND_STATE["level"]
+    graphics.set_pen(cached_pen((46, 58, 64)))
+    if SURFACE_EVENT["kind"] == "fin":
+        for dy, (left, right) in enumerate(FIN_ROWS):
+            for dx in range(left, right + 1):
+                draw_visible_pixel(x + direction * dx, surface - 4 + dy)
+    else:
+        # A three-pixel neck and tiny forward-facing eyepiece.
+        for dy in range(4):
+            draw_visible_pixel(x + direction * 4, surface - 3 + dy)
+        draw_visible_pixel(x + direction * 5, surface - 3)
+        draw_visible_pixel(x + direction * 6, surface - 3)
+        graphics.set_pen(cached_pen((86, 105, 109)))
+        draw_visible_pixel(x + direction * 6, surface - 2)
+    graphics.set_pen(cached_pen((0, 92, 112)))
+    draw_visible_pixel(x - direction * 2, surface)
+    draw_visible_pixel(x - direction * 4, surface)
+
+
 def draw_warning_edges(data, now_ms):
     is_cold = bool(data.get("is_cold", False))
     lightning_hour = safe_int(data.get("lightning_strikes_last_hour", 0)) > 0
@@ -1506,28 +1669,33 @@ def draw_warning_edges(data, now_ms):
         graphics.set_pen(pen_red())
         graphics.rectangle(0, 0, 8, 2)
         graphics.rectangle(0, 0, 2, 8)
-        graphics.rectangle(56, 0, 8, 2)
-        graphics.rectangle(62, 0, 2, 8)
+        graphics.rectangle(WIDTH - 8, 0, 8, 2)
+        graphics.rectangle(WIDTH - 2, 0, 2, 8)
     if lightning_now:
         graphics.set_pen(make_pen(blend_rgb((28, 0, 0), (120, 0, 0), lightning_pulse_amount(now_ms))))
-        graphics.rectangle(0, 0, 64, 2)
-        graphics.rectangle(0, 62, 64, 2)
+        graphics.rectangle(0, 0, WIDTH, 2)
+        graphics.rectangle(0, 62, WIDTH, 2)
         graphics.rectangle(0, 0, 2, 64)
-        graphics.rectangle(62, 0, 2, 64)
+        graphics.rectangle(WIDTH - 2, 0, 2, 64)
     if is_cold:
         graphics.set_pen(pen_blue())
         graphics.rectangle(0, 62, 8, 2)
         graphics.rectangle(0, 56, 2, 8)
-        graphics.rectangle(56, 62, 8, 2)
-        graphics.rectangle(62, 56, 2, 8)
+        graphics.rectangle(WIDTH - 8, 62, 8, 2)
+        graphics.rectangle(WIDTH - 2, 56, 2, 8)
 
 
 def draw_weather(data, now_ms, pulses, data_fault=False):
     clear_screen()
+    drift_step = UI_DRIFT.update(now_ms, min(3, SCREEN_COUNT)) if UI_DRIFT_MINUTES > 0 else 0
+    header_drift = clamp(drift_step, -1, 1)
+    ui_shift = UI_SHIFT + drift_step
     update_abduction(data, now_ms)
     draw_night_sky(data, now_ms)
     draw_weather_particles(data, now_ms)
     draw_ground_accumulation(data, now_ms)
+    draw_clouds(data, now_ms)
+    draw_surface_event(now_ms)
 
     temperature = data.get("temperature_c", "--")
     humidity = data.get("humidity", "--")
@@ -1548,21 +1716,21 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     )
 
     draw_pixel_text(
-        clock_text, 2, 3,
+        clock_text, 2 + header_drift, 3,
         animated_pen((85, 85, 85), pulses.amount("clock", now_ms)),
         scale=2,
     )
-    humidity_x = 62 - pixel_text_width(humidity_text, scale=2)
+    humidity_x = WIDTH - 2 + header_drift - pixel_text_width(humidity_text, scale=2)
     draw_pixel_text(
         humidity_text, humidity_x, 3,
         animated_pen((0, 95, 105), pulses.amount("humidity", now_ms)),
         scale=2,
     )
-    draw_divider_line(16, clock_second, top=True, fault=data_fault)
+    draw_divider_line(16, clock_second, top=True, fault=NETWORK_FAULTS[0])
 
     temp_scale = 3 if pixel_text_width(temp_text, scale=3) <= 40 else 2
     temp_width = pixel_text_width(temp_text, scale=temp_scale)
-    temp_x = max(3, (49 - temp_width) // 2 + 3)
+    temp_x = ui_shift + max(3, (49 - temp_width) // 2 + 3)
     temp_y = 21 if temp_scale == 3 else 24
     lift_y, beam_fade, temp_visible = abduction_temperature(now_ms)
     temp_y += lift_y
@@ -1583,20 +1751,20 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
         graphics.rectangle(degree_x, temp_y, 2, 2)
         draw_pixel_text(DISPLAY_TEMPERATURE_UNIT, degree_x + 4, temp_y + 2, unit_pen, scale=1)
 
-    draw_divider_line(42, clock_second, top=False, fault=data_fault)
+    draw_divider_line(42, clock_second, top=False, fault=(NETWORK_FAULTS[1] or not data.get("data_ok", True)))
 
     # Standalone MIN/MAX are Open-Meteo's forecast minimum and maximum for the
     # complete local calendar day, not observations collected since midnight.
-    outline_pixel_text("MIN", 4, 45, scale=1)
-    outline_pixel_text("MAX", 26, 45, scale=1)
-    draw_pixel_text("MIN", 4, 45, pen_secondary(), scale=1)
-    draw_pixel_text("MAX", 26, 45, pen_secondary(), scale=1)
+    outline_pixel_text("MIN", ui_shift + 4, 45, scale=1)
+    outline_pixel_text("MAX", ui_shift + 26, 45, scale=1)
+    draw_pixel_text("MIN", ui_shift + 4, 45, pen_secondary(), scale=1)
+    draw_pixel_text("MAX", ui_shift + 26, 45, pen_secondary(), scale=1)
     draw_daily_temperature(
-        min_temp, 4, 20,
+        min_temp, ui_shift + 4, 20,
         animated_pen(temperature_rgb(min_temp), pulses.amount("min", now_ms)),
     )
     draw_daily_temperature(
-        max_temp, 25, 23,
+        max_temp, ui_shift + 25, 23,
         animated_pen(temperature_rgb(max_temp), pulses.amount("max", now_ms)),
     )
 
@@ -1604,23 +1772,26 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     # codes rather than the home station's local pressure/lightning heuristics.
     if data.get("storm_warning", False):
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            draw_storm_warning(52 + dx, 50 + dy, BLACK)
-        draw_storm_warning(52, 50, animated_pen((120, 65, 0), storm_pulse_amount(now_ms)))
+            draw_storm_warning(ui_shift + 52 + dx, 50 + dy, BLACK)
+        draw_storm_warning(ui_shift + 52, 50, animated_pen((120, 65, 0), storm_pulse_amount(now_ms)))
     else:
         arrow = ARROWS.get(trend, ARROWS["steady"])
-        outline_bitmap(arrow, 52, 50, thickness=2)
+        outline_bitmap(arrow, ui_shift + 52, 50, thickness=2)
         draw_bitmap(
-            arrow, 52, 50,
+            arrow, ui_shift + 52, 50,
             animated_pen(pressure_trend_rgb(trend), pulses.amount("pressure", now_ms)),
             thickness=2,
         )
 
-    draw_flood_fish(now_ms)
-    draw_day_creature(data, now_ms, clock_second, data_fault)
+    for state in FISH_STATES:
+        draw_flood_fish(now_ms, state)
+    for state in BIRD_STATES:
+        draw_day_creature(data, now_ms, clock_second, data_fault, state)
     after_sunset = is_after_sunset(data)
     daylight = is_daylight(data)
     if (after_sunset or daylight) and not ABDUCTION["active"]:
-        draw_ufo(now_ms, daylight=daylight and not after_sunset)
+        for state in UFO_STATES:
+            draw_ufo(now_ms, daylight=daylight and not after_sunset, state=state)
     draw_abduction(now_ms)
     draw_warning_edges(data, now_ms)
 
@@ -1653,103 +1824,65 @@ EMPTY_WEATHER = {
 show_message("Starting", "weather")
 time.sleep(1)
 
-while not connect_wifi():
-    show_message("WiFi", "waiting")
-    time.sleep(10)
-
-ntp_synced = sync_time(
-    attempts=NTP_BOOT_ATTEMPTS,
-    retry_seconds=NTP_BOOT_RETRY_SECONDS,
-    show_status=True,
-)
-last_ntp_attempt_ms = time.ticks_ms()
-last_ntp_success_ms = last_ntp_attempt_ms if ntp_synced else None
-
 latest_data = dict(EMPTY_WEATHER)
-last_fetch = 0
-last_weather_success = None
+recovery = Recovery(WIFI_SSID, WIFI_PASSWORD)
+next_fetch_ms = time.ticks_ms()
+last_weather_success_ms = None
+weather_day = None
+last_day = None
+api_failed = False
 pulses = PulseTracker()
 next_frame_ms = time.ticks_ms()
 
 while True:
     frame_started_ms = time.ticks_ms()
-    now = time.time()
     now_ms = frame_started_ms
+    previously_synced = recovery.synced
+    connected, recovered = recovery.poll(now_ms) if not DEMO_MODE else (True, False)
+    now = time.time()
+    if recovery.synced and not previously_synced:
+        LOCAL_TIME_CACHE["epoch_second"] = None
     update_local_time_cache(now)
+    if not recovery.synced and not DEMO_MODE:
+        LOCAL_TIME_CACHE["clock_text"] = "--:--"
     update_festive_button(now_ms)
+    local = LOCAL_TIME_CACHE["parts"]
+    day = "{:04d}-{:02d}-{:02d}".format(local[0], local[1], local[2])
+    day_changed = last_day is not None and day != last_day
+    last_day = day
     refresh_seconds = DEMO_REFRESH_SECONDS if DEMO_MODE else WEATHER_REFRESH_SECONDS
     fetch_elapsed_ms = 0
-
-    # If boot-time NTP failed, retry every five minutes. Once synchronised,
-    # refresh the RTC daily. Runtime retries do not replace the weather display
-    # with a status message.
-    ntp_due_ms = NTP_RESYNC_MS if ntp_synced else NTP_RETRY_MS
-    ntp_reference_ms = last_ntp_success_ms if ntp_synced else last_ntp_attempt_ms
-    if time.ticks_diff(now_ms, ntp_reference_ms) >= ntp_due_ms:
-        last_ntp_attempt_ms = now_ms
-        if sync_time(show_status=False):
-            ntp_synced = True
-            last_ntp_success_ms = time.ticks_ms()
-            # NTP may have corrected the epoch substantially. Re-read it before
-            # using epoch-based weather refresh/freshness timestamps.
-            now = time.time()
-
-    if now - last_fetch >= refresh_seconds:
+    if recovered or day_changed:
+        next_fetch_ms = now_ms
+    if connected and time.ticks_diff(now_ms, next_fetch_ms) >= 0:
         fetch_started_ms = time.ticks_ms()
-        if DEMO_MODE:
-            latest_data = get_demo_weather()
-            last_fetch = now
-            last_weather_success = now
-            print("Demo weather updated")
-        else:
-            try:
-                new_data = fetch_weather()
-                set_weather_timezone_offset(new_data)
-                latest_data = new_data
-                last_fetch = now
-                last_weather_success = now
-                print("Open-Meteo weather updated")
-            except Exception as error:
-                # Keep the last successful weather visible. If Wi-Fi itself has
-                # dropped, actively reconnect so a router/AP outage heals
-                # without rebooting the display.
-                print("Weather fetch failed:")
-                print(error)
-                last_fetch = now
-                wlan = network.WLAN(network.STA_IF)
-                if not wlan.isconnected():
-                    print("WiFi disconnected; attempting recovery")
-                    if connect_wifi():
-                        print("WiFi recovered; retrying weather immediately")
-                        try:
-                            new_data = fetch_weather()
-                            set_weather_timezone_offset(new_data)
-                            latest_data = new_data
-                            now = time.time()
-                            last_fetch = now
-                            last_weather_success = now
-                            print("Open-Meteo weather updated after WiFi recovery")
-                            if not ntp_synced:
-                                last_ntp_attempt_ms = time.ticks_ms()
-                                if sync_time(show_status=False):
-                                    ntp_synced = True
-                                    last_ntp_success_ms = time.ticks_ms()
-                                    now = time.time()
-                        except Exception as retry_error:
-                            print("Weather retry after WiFi recovery failed:")
-                            print(retry_error)
+        # A failed request retries in one minute; usable cached data stays visible.
+        next_fetch_ms = time.ticks_add(now_ms, 60000)
+        try:
+            new_data = get_demo_weather() if DEMO_MODE else fetch_weather()
+            set_weather_timezone_offset(new_data)
+            latest_data = new_data
+            weather_day = new_data.get("weather_day") or day
+            last_weather_success_ms = time.ticks_ms()
+            next_fetch_ms = time.ticks_add(last_weather_success_ms, refresh_seconds * 1000)
+            api_failed = False
+        except Exception as error:
+            api_failed = True
+            print("Weather retry deferred:", error)
         fetch_elapsed_ms = time.ticks_diff(time.ticks_ms(), fetch_started_ms)
-        # HTTP/JSON parsing allocates temporary objects. Reclaim them here so
-        # garbage collection does not interrupt an arbitrary animation frame.
         gc.collect()
 
-    if DEMO_MODE:
-        data_fault = False
-    elif last_weather_success is None:
-        data_fault = True
-    else:
-        data_fault = (now - last_weather_success) >= WEATHER_STALE_SECONDS
-
+    stale = last_weather_success_ms is None or time.ticks_diff(now_ms, last_weather_success_ms) >= 1800000
+    if stale:
+        last_weather_success_ms = None  # Latch stale across ticks counter wraps.
+    # Do not label cached yesterday extrema as today's values.
+    wrong_day = recovery.synced and weather_day is not None and weather_day != day
+    if wrong_day:
+        latest_data["min_temperature_c"] = "--"
+        latest_data["max_temperature_c"] = "--"
+    data_fault = not DEMO_MODE and (not connected or api_failed or stale or wrong_day)
+    # Upper red bar: Wi-Fi; lower red bar: API/stale/day mismatch.
+    NETWORK_FAULTS = (not connected, api_failed or stale or wrong_day)
     update_elapsed_ms = draw_weather(latest_data, now_ms, pulses, data_fault=data_fault)
 
     # TARGET_FRAME_MS is a complete frame budget, not an additional sleep.
@@ -1763,3 +1896,4 @@ while True:
     else:
         # Network delays should not cause a burst of catch-up frames.
         next_frame_ms = time.ticks_ms()
+

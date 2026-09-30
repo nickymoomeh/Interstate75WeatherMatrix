@@ -30,3 +30,16 @@ NIGHT_DIM_FACTOR = 0.35
 
 # Optional performance diagnostics. Leave False for normal use.
 PERFORMANCE_LOGGING = False
+
+
+# Horizontal 64x64 HUB75 panels (1 through 4, subject to firmware/memory).
+SCREEN_COUNT = 1
+
+# Sparse extra wildlife/clouds and rare surface visitors; width determines caps.
+AMBIENT_ACTIVITY = True
+# One-pixel drift step interval. 0 disables; headers move +/-1 pixel, the
+# central reading group moves +/-SCREEN_COUNT pixels (capped at 3).
+UI_DRIFT_MINUTES = 15
+
+# Dry-weather leaves start at a light breeze; below 8 km/h visits are sparse.
+WIND_LEAF_THRESHOLD_KMH = 5
