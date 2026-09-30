@@ -1,5 +1,5 @@
 """Run with CPython: python tests/test_runtime.py (no Pico required)."""
-import ast, sys, types, time as real_time
+import ast, sys, types, re, time as real_time
 from pathlib import Path
 class Clock:
  now=0
@@ -50,7 +50,8 @@ for folder in roots:
   cfg_path=Path(folder,'config.py')
   if cfg_path.exists():exec(cfg_path.read_text(),cfg.__dict__)
   cfg.SCREEN_COUNT=panels;sys.modules['config']=cfg
-  s=Path(folder,'main.py').read_text().replace('SCREEN_COUNT = 1  #','SCREEN_COUNT = %d  #'%panels)
+  s=Path(folder,'main.py').read_text()
+  s=re.sub(r'^SCREEN_COUNT = [0-9]+', 'SCREEN_COUNT = %d'%panels, s, flags=re.M)
   prefix=s[:s.index('show_message("Starting", "weather")')]
   env={};exec(prefix,env)
   env['NETWORK_FAULTS']=(False,False)
@@ -67,6 +68,20 @@ for folder in roots:
   assert len(env['graphics'].pixels)>=16*panels
   if panels>1:assert max(x for x,y in env['graphics'].pixels)>=64
   print(folder,panels,'rendering and geometry OK')
+  from ambient_checks import exercise
+  exercise(env, clock)
+  # Optional controls keep the original restrained population and centred UI.
+  cfg.AMBIENT_ACTIVITY=False;cfg.UI_DRIFT_MINUTES=0
+  restrained={}
+  restrained_prefix=prefix.replace('AMBIENT_ACTIVITY = True', 'AMBIENT_ACTIVITY = False')
+  restrained_prefix=re.sub(r'^UI_DRIFT_MINUTES = [0-9]+', 'UI_DRIFT_MINUTES = 0', restrained_prefix, flags=re.M)
+  exec(restrained_prefix,restrained)
+  assert all(len(restrained[name])==1 for name in ('BIRD_STATES','UFO_STATES','FISH_STATES'))
+  restrained['is_daylight']=lambda _:True
+  restrained['CLOUD_STATE'].update(active=True,next_ms=1000,start_ms=0)
+  restrained['draw_clouds'](dict(data,forecast_ok=True,weather_code=3),1000)
+  assert not restrained['CLOUD_STATE']['active'] and restrained['UI_DRIFT_MINUTES']==0
+  cfg.AMBIENT_ACTIVITY=True;cfg.UI_DRIFT_MINUTES=15
   # Exercise actual main-loop body once, including demo fetch scheduling.
   tree=ast.parse(s); loop=tree.body[-1];assert isinstance(loop,ast.While)
   setup=ast.Module(body=tree.body[tree.body.index(next(n for n in tree.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and getattr(n.value.func,'id',None)=='show_message' and n.value.args[0].value=='Starting')):-1],type_ignores=[])
