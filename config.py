@@ -30,3 +30,7 @@ NIGHT_DIM_FACTOR = 0.35
 
 # Optional performance diagnostics. Leave False for normal use.
 PERFORMANCE_LOGGING = False
+
+
+# Horizontal 64x64 HUB75 panels (1 through 4, subject to firmware/memory).
+SCREEN_COUNT = 1

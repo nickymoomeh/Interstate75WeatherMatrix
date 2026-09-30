@@ -171,6 +171,8 @@ def fetch_weather(timeout_seconds=8):
         raise ValueError("Open-Meteo response has no current conditions")
 
     temperature = _safe_float(current.get("temperature_2m"))
+    if temperature is None:
+        raise ValueError("Open-Meteo response has no temperature")
     pressure_change = _pressure_change_3h(payload)
     weather_code = current.get("weather_code")
 
@@ -179,9 +181,16 @@ def fetch_weather(timeout_seconds=8):
     # physical lightning receiver detecting individual nearby strikes.
     storm_warning = weather_code in (95, 96, 99)
 
+    weather_day = current["time"][:10]
+    daily_days = daily.get("time") or []
+    try:
+        daily_index = daily_days.index(weather_day)
+    except ValueError:
+        daily_index = -1
+
     def first_daily(name):
         values = daily.get(name) or []
-        return values[0] if values else None
+        return values[daily_index] if 0 <= daily_index < len(values) else None
 
     try:
         utc_offset_seconds = int(payload.get("utc_offset_seconds", 0))
@@ -190,6 +199,7 @@ def fetch_weather(timeout_seconds=8):
 
     return {
         "data_ok": True,
+        "weather_day": weather_day,
         "forecast_ok": True,
         "temperature_c": temperature,
         "temperature_unit": DISPLAY_TEMPERATURE_UNIT,
@@ -225,3 +235,4 @@ def fetch_weather(timeout_seconds=8):
         "sunrise_time": first_daily("sunrise"),
         "sunset_time": first_daily("sunset"),
     }
+

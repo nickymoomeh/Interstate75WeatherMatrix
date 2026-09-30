@@ -1,4 +1,4 @@
-"""Standalone 64x64 weather matrix for the Pimoroni Interstate 75 W.
+"""Standalone horizontally chained weather matrix for the Pimoroni Interstate 75 W.
 
 The rendering and animation code is intentionally kept close to the original
 sensor-backed display so the standalone edition looks and behaves the same.
@@ -8,14 +8,16 @@ lives in sprites.py.
 Normal users should only need to edit config.py and create secrets.py.
 """
 
-from interstate75 import Interstate75, DISPLAY_INTERSTATE75_64X64, SWITCH_A
-import network
+from interstate75 import Interstate75, SWITCH_A
+import interstate75
 import time
-import ntptime
+from network_recovery import Recovery
 import gc
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
 from config import (
+    SCREEN_COUNT,
+    TIMEZONE,
     TEMPERATURE_UNIT,
     CLOCK_FORMAT,
     WEATHER_REFRESH_SECONDS,
@@ -59,15 +61,6 @@ LIGHTNING_PULSE_PERIOD_MS = 2400
 ACCUMULATION_STEP_MS = 30000
 ACCUMULATION_DRAIN_MS = 60000
 
-# Network/time resilience. Weather values remain on screen during a temporary
-# outage, but the divider/seconds bars turn red once the last successful
-# Open-Meteo update is 30 minutes old.
-WEATHER_STALE_SECONDS = 30 * 60
-NTP_BOOT_ATTEMPTS = 5
-NTP_BOOT_RETRY_SECONDS = 2
-NTP_RETRY_MS = 5 * 60 * 1000
-NTP_RESYNC_MS = 24 * 60 * 60 * 1000
-
 DISPLAY_TEMPERATURE_UNIT = str(TEMPERATURE_UNIT).upper()
 if DISPLAY_TEMPERATURE_UNIT not in ("C", "F"):
     raise ValueError('TEMPERATURE_UNIT must be "C" or "F"')
@@ -83,7 +76,21 @@ if DISPLAY_CLOCK_FORMAT not in (12, 24):
 # Display and runtime state
 # ---------------------------------------------------------------------------
 
-i75 = Interstate75(display=DISPLAY_INTERSTATE75_64X64)
+if type(SCREEN_COUNT) is not int or not 1 <= SCREEN_COUNT <= 4:
+    raise ValueError("SCREEN_COUNT must be an integer from 1 to 4")
+WIDTH = 64 * SCREEN_COUNT
+HEIGHT = 64
+try:
+    display_mode = getattr(interstate75, "DISPLAY_INTERSTATE75_{}X64".format(WIDTH))
+except AttributeError:
+    raise RuntimeError("Install Interstate75 firmware supporting {}x64".format(WIDTH))
+i75 = Interstate75(display=display_mode)
+if i75.display.get_bounds() != (WIDTH, HEIGHT):
+    raise RuntimeError("Unexpected framebuffer dimensions")
+# Preserve the 60-pixel single-panel platform; add scenery without full-width bars.
+BAR_WIDTH = 60 + (WIDTH - 64) * 3 // 4
+BAR_LEFT = (WIDTH - BAR_WIDTH) // 2
+UI_SHIFT = (WIDTH - 64) // 2
 graphics = i75.display
 
 BLACK = graphics.create_pen(0, 0, 0)
@@ -468,50 +475,6 @@ def outline_bitmap(bitmap, x, y, thickness=1):
 # Wi-Fi and local time
 # ---------------------------------------------------------------------------
 
-def connect_wifi():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if wlan.isconnected():
-        print("Already connected:")
-        print(wlan.ifconfig())
-        return True
-
-    show_message("WiFi", "connecting")
-    print("Connecting to WiFi...")
-    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-
-    timeout = 25
-    while timeout > 0:
-        if wlan.isconnected():
-            print("Connected!")
-            print(wlan.ifconfig())
-            return True
-        print("Waiting for WiFi...")
-        time.sleep(1)
-        timeout -= 1
-
-    print("WiFi failed")
-    return False
-
-
-def sync_time(attempts=1, retry_seconds=0, show_status=True):
-    attempts = max(1, int(attempts))
-    for attempt in range(attempts):
-        try:
-            if show_status:
-                show_message("Syncing", "time")
-            ntptime.settime()
-            print("Time synced")
-            print(time.localtime())
-            return True
-        except Exception as error:
-            print("Time sync failed (attempt {}/{}):".format(attempt + 1, attempts))
-            print(error)
-            if attempt + 1 < attempts and retry_seconds > 0:
-                time.sleep(retry_seconds)
-    return False
-
-
 def set_weather_timezone_offset(data):
     """Adopt the UTC offset supplied for the configured Open-Meteo timezone."""
     try:
@@ -524,12 +487,84 @@ def set_weather_timezone_offset(data):
         LOCAL_TIME_CACHE["epoch_second"] = None
 
 
+DST_CACHE = {"year": None, "march": None, "october": None}
+
+def is_leap_year(year):
+    if year % 400 == 0:
+        return True
+    if year % 100 == 0:
+        return False
+    return year % 4 == 0
+
+
+def days_in_month(year, month):
+    if month in [1, 3, 5, 7, 8, 10, 12]:
+        return 31
+    if month in [4, 6, 9, 11]:
+        return 30
+    if is_leap_year(year):
+        return 29
+    return 28
+
+
+def day_of_week(year, month, day):
+    t = time.mktime((year, month, day, 0, 0, 0, 0, 0))
+    return time.localtime(t)[6]
+
+
+def last_sunday(year, month):
+    day = days_in_month(year, month)
+    while day > 0:
+        if day_of_week(year, month, day) == 6:
+            return day
+        day -= 1
+    return 31
+
+
+def uk_utc_offset_hours(utc=None):
+    if utc is None:
+        utc = time.localtime()
+    year = utc[0]
+    month = utc[1]
+    day = utc[2]
+    hour = utc[3]
+
+    if DST_CACHE["year"] != year:
+        DST_CACHE["year"] = year
+        DST_CACHE["march"] = last_sunday(year, 3)
+        DST_CACHE["october"] = last_sunday(year, 10)
+    march_change_day = DST_CACHE["march"]
+    october_change_day = DST_CACHE["october"]
+
+    if month < 3 or month > 10:
+        return 0
+    if month > 3 and month < 10:
+        return 1
+
+    if month == 3:
+        if day > march_change_day:
+            return 1
+        if day < march_change_day:
+            return 0
+        return 1 if hour >= 1 else 0
+
+    if month == 10:
+        if day < october_change_day:
+            return 1
+        if day > october_change_day:
+            return 0
+        return 0 if hour >= 1 else 1
+
+    return 0
+
+
 def update_local_time_cache(now_seconds=None):
     try:
         epoch_second = int(time.time() if now_seconds is None else now_seconds)
         if LOCAL_TIME_CACHE["epoch_second"] == epoch_second:
             return
-        local = time.localtime(epoch_second + LOCAL_TIME_CACHE["utc_offset_seconds"])
+        offset = uk_utc_offset_hours(time.localtime(epoch_second)) * 3600 if TIMEZONE == "Europe/London" else LOCAL_TIME_CACHE["utc_offset_seconds"]
+        local = time.localtime(epoch_second + offset)
         hour = local[3]
         minute = local[4]
         previous_epoch = LOCAL_TIME_CACHE["epoch_second"]
@@ -727,7 +762,7 @@ def draw_storm_warning(x, y, pen):
 
 def draw_divider_line(y, second, top=True, fault=False):
     second = clamp(safe_int(second), 0, 59)
-    x = 2 + second
+    x = BAR_LEFT + second * (BAR_WIDTH - 1) // 59
     if fault:
         base_rgb, edge_rgb, centre_rgb = (65, 0, 0), (95, 0, 0), (145, 0, 0)
     else:
@@ -736,12 +771,12 @@ def draw_divider_line(y, second, top=True, fault=False):
         centre_rgb = (0, 118, 132) if top else (138, 76, 0)
 
     graphics.set_pen(cached_pen(base_rgb))
-    graphics.rectangle(2, y, 60, 1)
+    graphics.rectangle(BAR_LEFT, y, BAR_WIDTH, 1)
     if not fault and is_festive_period():
         offset = 0 if top else 2
         for bulb in range(second + 1):
             graphics.set_pen(cached_pen(FESTIVE_COLOURS[(bulb + offset) % 4]))
-            graphics.pixel(2 + bulb, y)
+            graphics.pixel(BAR_LEFT + bulb * (BAR_WIDTH - 1) // 59, y)
         graphics.set_pen(cached_pen(FESTIVE_BRIGHT[(second + offset) % 4]))
         graphics.rectangle(x, y - 1, 1, 3)
         return
@@ -760,7 +795,7 @@ def star_seed(value):
 
 
 def draw_visible_pixel(x, y):
-    if 0 <= x < 64 and 0 <= y < 64:
+    if 0 <= x < WIDTH and 0 <= y < 64:
         graphics.pixel(int(x), int(y))
 
 
@@ -795,7 +830,7 @@ def draw_ufo(now_ms, daylight=False):
         UFO_STATE["style"] = (seed >> 12) % len(UFO_WIDTHS)
         UFO_STATE["mode"] = mode
         UFO_STATE["duration_ms"] = (3800, 7200, 11500)[mode] + UFO_STATE["style"] * 650
-        UFO_STATE["hover_x"] = 17 + ((seed >> 13) % 30)
+        UFO_STATE["hover_x"] = 17 + ((seed >> 13) % (WIDTH - 34))
 
     elapsed = time.ticks_diff(now_ms, UFO_STATE["start_ms"])
     duration = UFO_STATE["duration_ms"]
@@ -808,7 +843,7 @@ def draw_ufo(now_ms, daylight=False):
     style = UFO_STATE["style"]
     width = UFO_WIDTHS[style]
     start_x = -width
-    target_x = 63 + width
+    target_x = WIDTH - 1 + width
     if UFO_STATE["mode"] == 2:
         enter_ms = 3000
         leave_ms = 3000
@@ -823,7 +858,7 @@ def draw_ufo(now_ms, daylight=False):
             leave_elapsed = elapsed - (duration - leave_ms)
             x = hover_x + direction * ((abs(leave_x - hover_x) * leave_elapsed) // leave_ms)
     else:
-        journey = 64 + width * 2
+        journey = WIDTH + width * 2
         x = start_x + (elapsed * journey) // duration if direction > 0 else target_x - (elapsed * journey) // duration
 
     y = UFO_STATE["y"] + UFO_BOB[(elapsed // 300) % len(UFO_BOB)]
@@ -958,7 +993,7 @@ def draw_festive_procession(x, y, right, elapsed):
 
 def day_creature_motion(elapsed, duration, origin_right, turnaround):
     if not turnaround:
-        return (elapsed * 82) // duration, origin_right, False
+        return (elapsed * (WIDTH + 18)) // duration, origin_right, False
     phase = (elapsed * 1000) // duration
     if phase < 300:
         progress = (phase * 35) // 300
@@ -970,7 +1005,7 @@ def day_creature_motion(elapsed, duration, origin_right, turnaround):
         progress = 45 - ((phase - 600) * 10) // 150
     else:
         progress = max(0, 35 - ((phase - 750) * 35) // 250)
-    return progress, origin_right if phase < 525 else not origin_right, 450 <= phase < 600
+    return progress * (WIDTH + 18) // 82, origin_right if phase < 525 else not origin_right, 450 <= phase < 600
 
 
 def draw_day_creature(data, now_ms, second, data_fault=False):
@@ -1025,20 +1060,20 @@ def draw_day_creature(data, now_ms, second, data_fault=False):
         return
 
     if DAY_CREATURE["kind"] == "duck":
-        progress = (elapsed * (64 + DUCK_FAMILY_WIDTH)) // duration
-        x = -DUCK_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else 64 - progress
+        progress = (elapsed * (WIDTH + DUCK_FAMILY_WIDTH)) // duration
+        x = -DUCK_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else WIDTH - progress
         draw_duck_family(x, 8, DAY_CREATURE["right"], elapsed)
         return
     if DAY_CREATURE["kind"] == "santa":
-        progress = (elapsed * (64 + FESTIVE_FAMILY_WIDTH)) // duration
-        x = -FESTIVE_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else 64 - progress
+        progress = (elapsed * (WIDTH + FESTIVE_FAMILY_WIDTH)) // duration
+        x = -FESTIVE_FAMILY_WIDTH + progress if DAY_CREATURE["right"] else WIDTH - progress
         draw_festive_procession(x, 6, DAY_CREATURE["right"], elapsed)
         return
 
     progress, right, stopped = day_creature_motion(
         elapsed, duration, DAY_CREATURE["right"], DAY_CREATURE["turnaround"]
     )
-    x = -18 + progress if DAY_CREATURE["right"] else 64 - progress
+    x = -18 + progress if DAY_CREATURE["right"] else WIDTH - progress
     perch = DAY_CREATURE["perch"]
     hop = 0 if stopped else (0, 0, -1, -2, -1, 0, 0, 0)[(elapsed // 150) % 8]
     front_x = x + 16 if right else x
@@ -1047,7 +1082,7 @@ def draw_day_creature(data, now_ms, second, data_fault=False):
         and not DAY_CREATURE["interaction_done"]
         and not data_fault
         and perch in (16, 42)
-        and abs(front_x - (2 + second)) <= 2
+        and abs(front_x - (BAR_LEFT + second * (BAR_WIDTH - 1) // 59)) <= 2
     ):
         DAY_CREATURE["interaction_done"] = True
         DAY_CREATURE["interaction_start_ms"] = now_ms
@@ -1108,11 +1143,11 @@ def draw_abduction(now_ms):
         return
     elapsed = time.ticks_diff(now_ms, ABDUCTION["start_ms"])
     if elapsed < 1500:
-        x = -23 + (45 * elapsed // 1500)
+        x = -23 + ((45 + UI_SHIFT) * elapsed // 1500)
     elif elapsed < 9000:
-        x = 22
+        x = UI_SHIFT + 22
     else:
-        x = 22 + (48 * (elapsed - 9000) // 1500)
+        x = UI_SHIFT + 22 + ((WIDTH - UI_SHIFT - 16) * (elapsed - 9000) // 1500)
     y = 17 + UFO_BOB[(elapsed // 260) % len(UFO_BOB)]
     colour_index = ABDUCTION["colour"]
     dome, body, lights, beam = ABDUCTION_COLOURS[colour_index]
@@ -1123,7 +1158,7 @@ def draw_abduction(now_ms):
         for by in range(22, 42):
             half = min(10, (by - 21) // 2)
             if (by + beam_phase) % 3 == 0:
-                for bx in range(31 - half, 32 + half):
+                for bx in range(UI_SHIFT + 31 - half, UI_SHIFT + 32 + half):
                     if (bx + by) % 2 == 0:
                         draw_visible_pixel(bx, by)
     graphics.set_pen(cached_pen(dome))
@@ -1147,11 +1182,11 @@ def draw_night_sky(data, now_ms):
         SHOOTING_STAR["next_ms"] = 0
         return
 
-    for index in range(16):
+    for index in range(16 * SCREEN_COUNT):
         cadence = 23000 + index * 3700
         epoch = now_ms // cadence
         seed = star_seed(epoch + index * 101)
-        x = 2 + (seed % 60)
+        x = 2 + (seed % (WIDTH - 4))
         y = 1 + ((seed >> 7) % 59)
         period = 2600 + index * 310
         phase = (now_ms + index * 557) % period
@@ -1184,8 +1219,8 @@ def draw_night_sky(data, now_ms):
         SHOOTING_STAR["active"] = False
         schedule_shooting_star(now_ms)
         return
-    travel = (elapsed * 70) // 2000
-    x = -3 + travel if SHOOTING_STAR["right"] else 66 - travel
+    travel = (elapsed * (WIDTH + 6)) // 2000
+    x = -3 + travel if SHOOTING_STAR["right"] else WIDTH + 2 - travel
     direction = 1 if SHOOTING_STAR["right"] else -1
     y = SHOOTING_STAR["y"] + travel // 12
     for index, colour in enumerate(((110, 110, 120), (65, 70, 82), (32, 38, 50))):
@@ -1235,14 +1270,14 @@ def draw_weather_particles(data, now_ms):
         drift_tenths = (wind_dx * min(180, int(effective_wind * 4.2))) // 100
         tail_dx = 1 if wind_dx > 20 else -1 if wind_dx < -20 else 0
         width_dx = -tail_dx if tail_dx else 1
-        for index in range(count):
+        for index in range(count * SCREEN_COUNT):
             shifted_ms = now_ms + index * 337
             phase_ms = shifted_ms % cycle_ms
             y = (phase_ms * 72) // cycle_ms - 5
             cycle_index = shifted_ms // cycle_ms
-            seed_x = RAIN_COLUMNS[(cycle_index + index * 7) % len(RAIN_COLUMNS)]
+            seed_x = RAIN_COLUMNS[(cycle_index + index * 7) % len(RAIN_COLUMNS)] + (index % SCREEN_COUNT) * 64
             drift_x = (phase_ms * drift_tenths) // (cycle_ms * 10)
-            x = 2 + ((seed_x - 2 + drift_x) % 60)
+            x = 2 + ((seed_x - 2 + drift_x) % (WIDTH - 4))
             graphics.set_pen(cached_pen((0, 100, 145)))
             draw_visible_pixel(x, y)
             draw_visible_pixel(x + width_dx, y)
@@ -1261,13 +1296,13 @@ def draw_weather_particles(data, now_ms):
         count = 3 if snow_cm < 0.3 else 5
         cycle_ms = 5200
         drift_tenths = (wind_dx * min(220, int(effective_wind * 5.5))) // 100
-        for index in range(count):
+        for index in range(count * SCREEN_COUNT):
             phase_ms = (now_ms + index * 911) % cycle_ms
             y = (phase_ms * 70) // cycle_ms - 3
-            seed_x = 3 + ((index * 23 + 11) % 58)
+            seed_x = 3 + ((index * 23 + 11) % (WIDTH - 6))
             drift_x = (phase_ms * drift_tenths) // (cycle_ms * 10)
             wave_index = ((phase_ms * 8) // cycle_ms + index) % 8
-            x = 2 + ((seed_x - 2 + drift_x + SNOW_FLUTTER[wave_index]) % 60)
+            x = 2 + ((seed_x - 2 + drift_x + SNOW_FLUTTER[wave_index]) % (WIDTH - 4))
             side_dx = 1 if wave_index < 4 else -1
             graphics.set_pen(cached_pen((92, 110, 125)))
             draw_visible_pixel(x, y)
@@ -1284,15 +1319,15 @@ def draw_weather_particles(data, now_ms):
         travel_ms = max(3600, 7600 - int(effective_wind * 65))
         interval_ms = travel_ms + 3000
         travels_right = wind_dx >= 0
-        for index in range(leaf_count):
+        for index in range(leaf_count * SCREEN_COUNT):
             phase_ms = (now_ms + index * 1900) % interval_ms
             if phase_ms >= travel_ms:
                 continue
             if travels_right:
-                x = -3 + (phase_ms * 70) // travel_ms
+                x = -3 + (phase_ms * (WIDTH + 6)) // travel_ms
                 tip_dx = 1
             else:
-                x = 66 - (phase_ms * 70) // travel_ms
+                x = WIDTH + 2 - (phase_ms * (WIDTH + 6)) // travel_ms
                 tip_dx = -1
             wave_index = ((phase_ms * 8) // travel_ms + index) % 8
             y = 18 + ((index * 13) % 28) + LEAF_Y_WAVE[wave_index]
@@ -1359,11 +1394,11 @@ def draw_ground_accumulation(data, now_ms):
     if kind == "snow":
         bank = (0, 1, 0, 0, 1, 1, 0, 1)
         graphics.set_pen(cached_pen((54, 68, 82)))
-        for x in range(64):
+        for x in range(WIDTH):
             height = min(21, level + bank[(x // 4) % len(bank)])
             graphics.rectangle(x, 64 - height, 1, height)
         graphics.set_pen(cached_pen((112, 125, 134)))
-        for x in range(64):
+        for x in range(WIDTH):
             height = min(21, level + bank[(x // 4) % len(bank)])
             draw_visible_pixel(x, 64 - height)
         return
@@ -1377,16 +1412,16 @@ def draw_ground_accumulation(data, now_ms):
         if band_height <= 0:
             continue
         graphics.set_pen(cached_pen(water_colours[band]))
-        graphics.rectangle(0, surface_y + band_start, 64, band_height)
+        graphics.rectangle(0, surface_y + band_start, WIDTH, band_height)
     graphics.set_pen(cached_pen((0, 72, 102)))
-    graphics.rectangle(0, surface_y, 64, 1)
+    graphics.rectangle(0, surface_y, WIDTH, 1)
 
     wind_dx = wind_dx_percent(data.get("wind_direction_deg"))
     for ripple in range(2):
         phase = (now_ms + ripple * 1900) % 4400
         if phase >= 2100:
             continue
-        centre = (18, 45)[ripple] + (wind_dx * phase) // 21000
+        centre = (18, 45)[ripple] * WIDTH // 64 + (wind_dx * phase) // 21000
         radius = 1 + (phase * 10) // 2100
         graphics.set_pen(cached_pen((0, 105, 132)))
         for side in (-1, 1):
@@ -1400,11 +1435,11 @@ def draw_ground_accumulation(data, now_ms):
 
     if level >= 6:
         bubble_span = max(2, level - 2)
-        for bubble in range(min(7, 2 + level // 5)):
+        for bubble in range(min(7, 2 + level // 5) * SCREEN_COUNT):
             cycle = 2600 + bubble * 370
             phase = (now_ms + bubble * 641) % cycle
             rise = (phase * bubble_span) // cycle
-            bx = 4 + ((bubble * 17 + 9) % 56) + UFO_BOB[(phase // 300 + bubble) % len(UFO_BOB)]
+            bx = 4 + ((bubble * 17 + 9 + (bubble % SCREEN_COUNT) * 64) % (WIDTH - 8)) + UFO_BOB[(phase // 300 + bubble) % len(UFO_BOB)]
             by = 62 - rise
             graphics.set_pen(cached_pen((20, 88, 112) if bubble % 3 else (34, 112, 138)))
             draw_visible_pixel(bx, by)
@@ -1460,12 +1495,12 @@ def draw_flood_fish(now_ms):
     species = FISH_STATE["species"]
     width = FISH_WIDTHS[species]
     height = FISH_HEIGHTS[species]
-    journey = 64 + width * 2
+    journey = WIDTH + width * 2
     if FISH_STATE["right"]:
         x = -width + (elapsed_ms * journey) // travel_ms
         direction = 1
     else:
-        x = 63 + width - (elapsed_ms * journey) // travel_ms
+        x = WIDTH - 1 + width - (elapsed_ms * journey) // travel_ms
         direction = -1
 
     y = FISH_STATE["y"]
@@ -1506,20 +1541,20 @@ def draw_warning_edges(data, now_ms):
         graphics.set_pen(pen_red())
         graphics.rectangle(0, 0, 8, 2)
         graphics.rectangle(0, 0, 2, 8)
-        graphics.rectangle(56, 0, 8, 2)
-        graphics.rectangle(62, 0, 2, 8)
+        graphics.rectangle(WIDTH - 8, 0, 8, 2)
+        graphics.rectangle(WIDTH - 2, 0, 2, 8)
     if lightning_now:
         graphics.set_pen(make_pen(blend_rgb((28, 0, 0), (120, 0, 0), lightning_pulse_amount(now_ms))))
-        graphics.rectangle(0, 0, 64, 2)
-        graphics.rectangle(0, 62, 64, 2)
+        graphics.rectangle(0, 0, WIDTH, 2)
+        graphics.rectangle(0, 62, WIDTH, 2)
         graphics.rectangle(0, 0, 2, 64)
-        graphics.rectangle(62, 0, 2, 64)
+        graphics.rectangle(WIDTH - 2, 0, 2, 64)
     if is_cold:
         graphics.set_pen(pen_blue())
         graphics.rectangle(0, 62, 8, 2)
         graphics.rectangle(0, 56, 2, 8)
-        graphics.rectangle(56, 62, 8, 2)
-        graphics.rectangle(62, 56, 2, 8)
+        graphics.rectangle(WIDTH - 8, 62, 8, 2)
+        graphics.rectangle(WIDTH - 2, 56, 2, 8)
 
 
 def draw_weather(data, now_ms, pulses, data_fault=False):
@@ -1552,17 +1587,17 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
         animated_pen((85, 85, 85), pulses.amount("clock", now_ms)),
         scale=2,
     )
-    humidity_x = 62 - pixel_text_width(humidity_text, scale=2)
+    humidity_x = WIDTH - 2 - pixel_text_width(humidity_text, scale=2)
     draw_pixel_text(
         humidity_text, humidity_x, 3,
         animated_pen((0, 95, 105), pulses.amount("humidity", now_ms)),
         scale=2,
     )
-    draw_divider_line(16, clock_second, top=True, fault=data_fault)
+    draw_divider_line(16, clock_second, top=True, fault=NETWORK_FAULTS[0])
 
     temp_scale = 3 if pixel_text_width(temp_text, scale=3) <= 40 else 2
     temp_width = pixel_text_width(temp_text, scale=temp_scale)
-    temp_x = max(3, (49 - temp_width) // 2 + 3)
+    temp_x = UI_SHIFT + max(3, (49 - temp_width) // 2 + 3)
     temp_y = 21 if temp_scale == 3 else 24
     lift_y, beam_fade, temp_visible = abduction_temperature(now_ms)
     temp_y += lift_y
@@ -1583,20 +1618,20 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
         graphics.rectangle(degree_x, temp_y, 2, 2)
         draw_pixel_text(DISPLAY_TEMPERATURE_UNIT, degree_x + 4, temp_y + 2, unit_pen, scale=1)
 
-    draw_divider_line(42, clock_second, top=False, fault=data_fault)
+    draw_divider_line(42, clock_second, top=False, fault=(NETWORK_FAULTS[1] or not data.get("data_ok", True)))
 
     # Standalone MIN/MAX are Open-Meteo's forecast minimum and maximum for the
     # complete local calendar day, not observations collected since midnight.
-    outline_pixel_text("MIN", 4, 45, scale=1)
-    outline_pixel_text("MAX", 26, 45, scale=1)
-    draw_pixel_text("MIN", 4, 45, pen_secondary(), scale=1)
-    draw_pixel_text("MAX", 26, 45, pen_secondary(), scale=1)
+    outline_pixel_text("MIN", UI_SHIFT + 4, 45, scale=1)
+    outline_pixel_text("MAX", UI_SHIFT + 26, 45, scale=1)
+    draw_pixel_text("MIN", UI_SHIFT + 4, 45, pen_secondary(), scale=1)
+    draw_pixel_text("MAX", UI_SHIFT + 26, 45, pen_secondary(), scale=1)
     draw_daily_temperature(
-        min_temp, 4, 20,
+        min_temp, UI_SHIFT + 4, 20,
         animated_pen(temperature_rgb(min_temp), pulses.amount("min", now_ms)),
     )
     draw_daily_temperature(
-        max_temp, 25, 23,
+        max_temp, UI_SHIFT + 25, 23,
         animated_pen(temperature_rgb(max_temp), pulses.amount("max", now_ms)),
     )
 
@@ -1604,17 +1639,21 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     # codes rather than the home station's local pressure/lightning heuristics.
     if data.get("storm_warning", False):
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            draw_storm_warning(52 + dx, 50 + dy, BLACK)
-        draw_storm_warning(52, 50, animated_pen((120, 65, 0), storm_pulse_amount(now_ms)))
+            draw_storm_warning(UI_SHIFT + 52 + dx, 50 + dy, BLACK)
+        draw_storm_warning(UI_SHIFT + 52, 50, animated_pen((120, 65, 0), storm_pulse_amount(now_ms)))
     else:
         arrow = ARROWS.get(trend, ARROWS["steady"])
-        outline_bitmap(arrow, 52, 50, thickness=2)
+        outline_bitmap(arrow, UI_SHIFT + 52, 50, thickness=2)
         draw_bitmap(
-            arrow, 52, 50,
+            arrow, UI_SHIFT + 52, 50,
             animated_pen(pressure_trend_rgb(trend), pulses.amount("pressure", now_ms)),
             thickness=2,
         )
 
+    if SCREEN_COUNT > 1:
+        graphics.set_pen(BLACK)
+        graphics.rectangle(WIDTH // 2 - 1, 16, 2, 1)
+        graphics.rectangle(WIDTH // 2 - 1, 42, 2, 1)
     draw_flood_fish(now_ms)
     draw_day_creature(data, now_ms, clock_second, data_fault)
     after_sunset = is_after_sunset(data)
@@ -1653,103 +1692,65 @@ EMPTY_WEATHER = {
 show_message("Starting", "weather")
 time.sleep(1)
 
-while not connect_wifi():
-    show_message("WiFi", "waiting")
-    time.sleep(10)
-
-ntp_synced = sync_time(
-    attempts=NTP_BOOT_ATTEMPTS,
-    retry_seconds=NTP_BOOT_RETRY_SECONDS,
-    show_status=True,
-)
-last_ntp_attempt_ms = time.ticks_ms()
-last_ntp_success_ms = last_ntp_attempt_ms if ntp_synced else None
-
 latest_data = dict(EMPTY_WEATHER)
-last_fetch = 0
-last_weather_success = None
+recovery = Recovery(WIFI_SSID, WIFI_PASSWORD)
+next_fetch_ms = time.ticks_ms()
+last_weather_success_ms = None
+weather_day = None
+last_day = None
+api_failed = False
 pulses = PulseTracker()
 next_frame_ms = time.ticks_ms()
 
 while True:
     frame_started_ms = time.ticks_ms()
-    now = time.time()
     now_ms = frame_started_ms
+    previously_synced = recovery.synced
+    connected, recovered = recovery.poll(now_ms) if not DEMO_MODE else (True, False)
+    now = time.time()
+    if recovery.synced and not previously_synced:
+        LOCAL_TIME_CACHE["epoch_second"] = None
     update_local_time_cache(now)
+    if not recovery.synced and not DEMO_MODE:
+        LOCAL_TIME_CACHE["clock_text"] = "--:--"
     update_festive_button(now_ms)
+    local = LOCAL_TIME_CACHE["parts"]
+    day = "{:04d}-{:02d}-{:02d}".format(local[0], local[1], local[2])
+    day_changed = last_day is not None and day != last_day
+    last_day = day
     refresh_seconds = DEMO_REFRESH_SECONDS if DEMO_MODE else WEATHER_REFRESH_SECONDS
     fetch_elapsed_ms = 0
-
-    # If boot-time NTP failed, retry every five minutes. Once synchronised,
-    # refresh the RTC daily. Runtime retries do not replace the weather display
-    # with a status message.
-    ntp_due_ms = NTP_RESYNC_MS if ntp_synced else NTP_RETRY_MS
-    ntp_reference_ms = last_ntp_success_ms if ntp_synced else last_ntp_attempt_ms
-    if time.ticks_diff(now_ms, ntp_reference_ms) >= ntp_due_ms:
-        last_ntp_attempt_ms = now_ms
-        if sync_time(show_status=False):
-            ntp_synced = True
-            last_ntp_success_ms = time.ticks_ms()
-            # NTP may have corrected the epoch substantially. Re-read it before
-            # using epoch-based weather refresh/freshness timestamps.
-            now = time.time()
-
-    if now - last_fetch >= refresh_seconds:
+    if recovered or day_changed:
+        next_fetch_ms = now_ms
+    if connected and time.ticks_diff(now_ms, next_fetch_ms) >= 0:
         fetch_started_ms = time.ticks_ms()
-        if DEMO_MODE:
-            latest_data = get_demo_weather()
-            last_fetch = now
-            last_weather_success = now
-            print("Demo weather updated")
-        else:
-            try:
-                new_data = fetch_weather()
-                set_weather_timezone_offset(new_data)
-                latest_data = new_data
-                last_fetch = now
-                last_weather_success = now
-                print("Open-Meteo weather updated")
-            except Exception as error:
-                # Keep the last successful weather visible. If Wi-Fi itself has
-                # dropped, actively reconnect so a router/AP outage heals
-                # without rebooting the display.
-                print("Weather fetch failed:")
-                print(error)
-                last_fetch = now
-                wlan = network.WLAN(network.STA_IF)
-                if not wlan.isconnected():
-                    print("WiFi disconnected; attempting recovery")
-                    if connect_wifi():
-                        print("WiFi recovered; retrying weather immediately")
-                        try:
-                            new_data = fetch_weather()
-                            set_weather_timezone_offset(new_data)
-                            latest_data = new_data
-                            now = time.time()
-                            last_fetch = now
-                            last_weather_success = now
-                            print("Open-Meteo weather updated after WiFi recovery")
-                            if not ntp_synced:
-                                last_ntp_attempt_ms = time.ticks_ms()
-                                if sync_time(show_status=False):
-                                    ntp_synced = True
-                                    last_ntp_success_ms = time.ticks_ms()
-                                    now = time.time()
-                        except Exception as retry_error:
-                            print("Weather retry after WiFi recovery failed:")
-                            print(retry_error)
+        # A failed request retries in one minute; usable cached data stays visible.
+        next_fetch_ms = time.ticks_add(now_ms, 60000)
+        try:
+            new_data = get_demo_weather() if DEMO_MODE else fetch_weather()
+            set_weather_timezone_offset(new_data)
+            latest_data = new_data
+            weather_day = new_data.get("weather_day") or day
+            last_weather_success_ms = time.ticks_ms()
+            next_fetch_ms = time.ticks_add(last_weather_success_ms, refresh_seconds * 1000)
+            api_failed = False
+        except Exception as error:
+            api_failed = True
+            print("Weather retry deferred:", error)
         fetch_elapsed_ms = time.ticks_diff(time.ticks_ms(), fetch_started_ms)
-        # HTTP/JSON parsing allocates temporary objects. Reclaim them here so
-        # garbage collection does not interrupt an arbitrary animation frame.
         gc.collect()
 
-    if DEMO_MODE:
-        data_fault = False
-    elif last_weather_success is None:
-        data_fault = True
-    else:
-        data_fault = (now - last_weather_success) >= WEATHER_STALE_SECONDS
-
+    stale = last_weather_success_ms is None or time.ticks_diff(now_ms, last_weather_success_ms) >= 1800000
+    if stale:
+        last_weather_success_ms = None  # Latch stale across ticks counter wraps.
+    # Do not label cached yesterday extrema as today's values.
+    wrong_day = recovery.synced and weather_day is not None and weather_day != day
+    if wrong_day:
+        latest_data["min_temperature_c"] = "--"
+        latest_data["max_temperature_c"] = "--"
+    data_fault = not DEMO_MODE and (not connected or api_failed or stale or wrong_day)
+    # Upper red bar: Wi-Fi; lower red bar: API/stale/day mismatch.
+    NETWORK_FAULTS = (not connected, api_failed or stale or wrong_day)
     update_elapsed_ms = draw_weather(latest_data, now_ms, pulses, data_fault=data_fault)
 
     # TARGET_FRAME_MS is a complete frame budget, not an additional sleep.
@@ -1763,3 +1764,4 @@ while True:
     else:
         # Network delays should not cause a burst of catch-up frames.
         next_frame_ms = time.ticks_ms()
+

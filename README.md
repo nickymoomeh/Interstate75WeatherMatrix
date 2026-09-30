@@ -1,6 +1,6 @@
 # Interstate75WeatherMatrix
 
-A standalone 64×64 animated LED weather display for the **Pimoroni Interstate 75 W**.
+A standalone, configurable-width animated LED weather display for the **Pimoroni Interstate 75 W**.
 
 This project grew out of a sensor-backed home weather matrix that used a Raspberry Pi, InfluxDB and local 433 MHz/BMP280 weather sensors. This edition needs none of that infrastructure: the Interstate 75 W connects directly to Wi-Fi and retrieves its weather data from **Open-Meteo**.
 
@@ -32,7 +32,7 @@ The decorative animation runs locally at a target of eight frames per second. We
 ## Hardware
 
 - Pimoroni Interstate 75 W
-- 64×64 HUB75 RGB LED matrix
+- one or more horizontally chained 64×64 HUB75 RGB LED matrices
 - suitable 5 V power supply for the matrix
 
 The code targets Pimoroni's MicroPython build for the Interstate 75 W.
@@ -41,6 +41,7 @@ The code targets Pimoroni's MicroPython build for the Interstate 75 W.
 
 - `main.py` — display loop, rendering, animation and runtime state
 - `sprites.py` — static pixel artwork, colour palettes and animation-frame data
+- `network_recovery.py` — Wi-Fi recovery and periodic NTP scheduling
 - `weather_source.py` — Open-Meteo request and translation into the fields used by the display
 - `config.py` — normal user-editable settings such as location, timezone, temperature unit, clock format, refresh rate and brightness behaviour
 - `secrets.example.py` — safe Wi-Fi credentials template
@@ -61,6 +62,7 @@ Copy these files to the root of the Interstate 75 W filesystem:
 - `main.py`
 - `sprites.py`
 - `weather_source.py`
+- `network_recovery.py`
 - `config.py`
 
 ### 3. Create `secrets.py`
@@ -95,7 +97,7 @@ America/New_York
 Australia/Sydney
 ```
 
-Open-Meteo returns the correct UTC offset for the requested timezone and the display uses that to convert NTP's UTC clock to local time. This means daylight-saving changes are not hard-coded to the UK.
+Open-Meteo returns the correct UTC offset for the requested timezone and the display uses that to convert NTP's UTC clock to local time. For Europe/London, local GMT/BST transition rules also keep DST correct while offline. Other timezones use the most recently received API offset.
 
 ### 5. Choose temperature and clock units if required
 
@@ -121,13 +123,26 @@ The bottom `MIN`/`MAX` readings normally keep one decimal place. In Fahrenheit m
 
 ### 6. Reboot
 
-On boot the display will:
+The animation loop starts even if Wi-Fi or NTP is unavailable. Wi-Fi retries automatically; NTP retries every five minutes after failures and approximately daily after success. Until the first successful NTP sync, the clock reads `--:--` while weather can still update.
 
-1. initialise the matrix;
-2. connect to Wi-Fi;
-3. synchronise its clock using NTP;
-4. request weather from Open-Meteo;
-5. begin the normal animated display.
+Set `SCREEN_COUNT = 1` in `config.py` for 64×64, or `SCREEN_COUNT = 2` for 128×64. Counts 1–4 select the matching Pimoroni display mode; unsupported firmware fails with a clear message. The driver configures the HUB75 output width as well as the framebuffer. Both panels must have compatible scan/driver requirements. Connect first-panel OUT to second-panel IN and power both appropriately. See [Pimoroni's Interstate75 implementation](https://github.com/pimoroni/pimoroni-pico/blob/main/micropython/modules_py/interstate75.py).
+
+Sprites and font sizes stay unchanged. Clock and humidity occupy opposite edges; the temperature and lower readings remain a centred cluster. Wider screens show more scenery. Each existing divider/platform grows from 60 to 108 pixels at two panels, centred with a two-pixel gap. Wildlife can cross the gap and the physical join. Stars, precipitation, leaves and bubbles maintain density; bird, fish, UFO and shooting-star schedules stay unchanged.
+
+The upper bar turns red for lost Wi-Fi; the lower bar turns red for request failure, stale/no weather, or previous-day extrema. Normal seconds motion continues in both states. A failed request retains cached readings and retries after one minute; normal Open-Meteo refresh remains ten minutes. After thirty minutes without an update, cached readings are explicitly marked stale. Previous-day extrema become `--` after local midnight and refresh automatically after recovery.
+
+### Hardware checks
+
+1. Confirm the original layout with `SCREEN_COUNT = 1`.
+2. With `SCREEN_COUNT = 2`, confirm panel order, colours, scan alignment and brightness, and watch actors cross x=64.
+3. Check both platform bars, decimal min/max, rain/snow, ground coverage, night stars and warning edges.
+4. Disable Wi-Fi for at least ten minutes, then restore it: expect red upper bar, retained temperature, and recovery without reset.
+5. Block Internet/API access with Wi-Fi still connected: expect red lower bar and one-minute retries. Try booting with NTP unavailable, then restoring it.
+6. Cross midnight while offline: yesterday extrema must disappear and return with the new day's data after recovery. Check GMT/BST transitions.
+
+Network requests remain synchronous and may briefly pause frames. HTTP socket timeout is eight seconds and NTP timeout is two seconds; firmware DNS resolution may have its own timeout. Desktop tests cannot verify actual scan timing, Pico memory headroom, colour mapping or radio/DNS behaviour. Enable performance logging temporarily when testing two panels.
+
+Run off-device regression checks with `python tests/test_runtime.py`, and syntax-check with `python -m compileall -q .`. The browser emulator remains its existing single-panel demonstration.
 
 ## Configuration
 
@@ -143,6 +158,7 @@ WEATHER_REFRESH_SECONDS = 600
 TARGET_FRAME_MS = 125
 NIGHT_DIM_FACTOR = 0.35
 PERFORMANCE_LOGGING = False
+SCREEN_COUNT = 1
 ```
 
 The default weather refresh is **10 minutes**. Open-Meteo's weather values do not need to be queried at animation-frame speed.
@@ -220,3 +236,4 @@ The standalone build has been tested on a physical Interstate 75 W and 64×64 HU
 ## Licence
 
 MIT License.
+
