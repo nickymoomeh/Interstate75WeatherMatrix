@@ -12,7 +12,7 @@ from interstate75 import Interstate75, SWITCH_A
 import interstate75
 import time
 from network_recovery import Recovery
-from ambient_motion import UIDrift, start_fish_motion, move_fish, CLOUD_ROWS, FIN_ROWS, compile_glyph_runs
+from ambient_motion import UIDrift, start_fish_motion, move_fish, CLOUD_ROWS, FIN_ROWS, compile_glyph_runs, rainbow_profile
 import gc
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
@@ -84,6 +84,11 @@ if type(SCREEN_COUNT) is not int or not 1 <= SCREEN_COUNT <= 4:
     raise ValueError("SCREEN_COUNT must be an integer from 1 to 4")
 WIDTH = 64 * SCREEN_COUNT
 HEIGHT = 64
+RAINBOW_DURATION_MS = 6000
+RAINBOW_COLOURS = ((52, 8, 8), (52, 24, 4), (48, 40, 4), (6, 40, 12),
+                   (6, 25, 52), (19, 10, 42), (38, 9, 42))
+RAINBOW_ROWS = rainbow_profile(WIDTH, HEIGHT)
+RAINBOW = {"start_ms": None, "last_key": None}
 try:
     display_mode = getattr(interstate75, "DISPLAY_INTERSTATE75_{}X64".format(WIDTH))
 except AttributeError:
@@ -1143,6 +1148,45 @@ def draw_day_creature(data, now_ms, second, data_fault=False, state=None):
     draw_visible_pixel(eye_x, eye_y)
     draw_visible_pixel(eye_x, eye_y + 1)
 
+def draw_day_rainbow(data, now_ms):
+    """Brief half-hourly background arc; environmental coordinates stay fixed."""
+    if not is_daylight(data):
+        RAINBOW["start_ms"] = None
+        return
+    local = local_time_parts()
+    # Allow a slow weather request at the boundary, but never replay mid-minute.
+    if local[4] in (0, 30) and local[5] < 10:
+        key = (local[0], local[1], local[2], local[3], local[4])
+        if key != RAINBOW["last_key"]:
+            RAINBOW["last_key"] = key
+            RAINBOW["start_ms"] = now_ms
+    start = RAINBOW["start_ms"]
+    if start is None:
+        return
+    elapsed = time.ticks_diff(now_ms, start)
+    if elapsed < 0 or elapsed >= RAINBOW_DURATION_MS:
+        RAINBOW["start_ms"] = None
+        return
+    fade_ms = min(750, RAINBOW_DURATION_MS // 2)
+    brightness = min(100, elapsed * 100 // fade_ms,
+                     (RAINBOW_DURATION_MS - elapsed) * 100 // fade_ms)
+    if brightness <= 0:
+        return
+    for band, rgb in enumerate(RAINBOW_COLOURS):
+        # Fade shades are transient; don't grow the persistent pen cache.
+        graphics.set_pen(cached_pen(rgb) if brightness == 100 else
+                         make_pen(tuple(channel * brightness // 100 for channel in rgb)))
+        x = 0
+        while x < WIDTH:
+            row = RAINBOW_ROWS[x]
+            end = x + 1
+            while end < WIDTH and RAINBOW_ROWS[end] == row:
+                end += 1
+            if row + band < HEIGHT:
+                graphics.rectangle(x, row + band, end - x, 1)
+            x = end
+
+
 def update_abduction(data, now_ms):
     if not is_after_sunset(data):
         ABDUCTION["active"] = False
@@ -1692,6 +1736,7 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     ui_shift = UI_SHIFT + drift_step
     update_abduction(data, now_ms)
     draw_night_sky(data, now_ms)
+    draw_day_rainbow(data, now_ms)
     draw_weather_particles(data, now_ms)
     draw_ground_accumulation(data, now_ms)
     draw_clouds(data, now_ms)
@@ -1715,9 +1760,10 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
         pressure_state, now_ms,
     )
 
+    clock_pen = animated_pen((85, 85, 85), pulses.amount("clock", now_ms))
     draw_pixel_text(
         clock_text, 2 + header_drift, 3,
-        animated_pen((85, 85, 85), pulses.amount("clock", now_ms)),
+        clock_pen,
         scale=2,
     )
     humidity_x = WIDTH - 2 + header_drift - pixel_text_width(humidity_text, scale=2)
@@ -1757,8 +1803,8 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     # complete local calendar day, not observations collected since midnight.
     outline_pixel_text("MIN", ui_shift + 4, 45, scale=1)
     outline_pixel_text("MAX", ui_shift + 26, 45, scale=1)
-    draw_pixel_text("MIN", ui_shift + 4, 45, pen_secondary(), scale=1)
-    draw_pixel_text("MAX", ui_shift + 26, 45, pen_secondary(), scale=1)
+    draw_pixel_text("MIN", ui_shift + 4, 45, clock_pen, scale=1)
+    draw_pixel_text("MAX", ui_shift + 26, 45, clock_pen, scale=1)
     draw_daily_temperature(
         min_temp, ui_shift + 4, 20,
         animated_pen(temperature_rgb(min_temp), pulses.amount("min", now_ms)),

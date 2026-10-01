@@ -93,3 +93,15 @@ def compile_glyph_runs(font):
                 runs.append(x - start)
         result[character] = bytes(runs)
     return result
+
+
+def rainbow_profile(width, height):
+    """Outer elliptical arc, calculated once; one byte per display column."""
+    span = width - 1
+    denominator = span * span
+    rows = bytearray(width)
+    for x in range(width):
+        distance = 2 * x - span
+        rise = (max(0, denominator - distance * distance) / denominator) ** 0.5
+        rows[x] = height - 1 - int((height - 2) * rise + 0.5)
+    return rows
