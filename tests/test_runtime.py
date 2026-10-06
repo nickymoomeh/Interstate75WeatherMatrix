@@ -72,6 +72,8 @@ for folder in roots:
   exercise(env, clock)
   from rainbow_checks import exercise as exercise_rainbow
   exercise_rainbow(env, clock)
+  from solar_checks import exercise as exercise_solar
+  exercise_solar(env, clock)
   # Optional controls keep the original restrained population and centred UI.
   cfg.AMBIENT_ACTIVITY=False;cfg.UI_DRIFT_MINUTES=0
   restrained={}

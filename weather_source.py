@@ -82,7 +82,8 @@ def _query_url():
         + "&hourly=" + hourly
         + "&daily=" + daily
         + "&temperature_unit=" + OPEN_METEO_TEMPERATURE_UNIT
-        + "&forecast_days=1"
+        + "&forecast_days=2"
+        + "&forecast_hours=1"
         + "&past_hours=3"
         + "&timezone=" + TIMEZONE.replace("/", "%2F")
     )
@@ -234,5 +235,7 @@ def fetch_weather(timeout_seconds=8):
         "wind_direction_deg": _safe_float(current.get("wind_direction_10m")),
         "sunrise_time": first_daily("sunrise"),
         "sunset_time": first_daily("sunset"),
+        "sunrise_times": (daily.get("sunrise") or [])[:2],
+        "sunset_times": (daily.get("sunset") or [])[:2],
     }
 

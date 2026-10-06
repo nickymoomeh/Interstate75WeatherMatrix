@@ -43,3 +43,6 @@ UI_DRIFT_MINUTES = 15
 
 # Dry-weather leaves start at a light breeze; below 8 km/h visits are sparse.
 WIND_LEAF_THRESHOLD_KMH = 5
+
+# Spare side space only: countdown to sunset by day / sunrise at night.
+SHOW_SOLAR_COUNTDOWN = True
