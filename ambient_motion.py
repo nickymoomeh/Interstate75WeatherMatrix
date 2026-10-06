@@ -69,8 +69,12 @@ def move_fish(state, now_ms, width, sprite_width):
     return centre, direction, finished
 
 
-# Tiny run-length rows, shared by every cloud. No duplicate sprite buffers.
-CLOUD_ROWS = ((7, 11), (4, 15), (2, 19), (0, 22), (1, 21), (4, 17))
+# One shared, lobed cartoon cloud; no duplicated sprite buffers.
+CLOUD_WIDTH = 33
+CLOUD_ROWS = (((10, 13),), ((8, 15),), ((7, 16), (22, 25)),
+              ((6, 18), (20, 27)), ((4, 29),), ((2, 30),),
+              ((1, 31),), ((0, 32),), ((0, 32),), ((1, 31),),
+              ((3, 29),), ((5, 27),))
 FIN_ROWS = ((6, 6), (5, 6), (4, 6), (3, 7), (2, 8))
 
 
@@ -105,3 +109,49 @@ def rainbow_profile(width, height):
         rise = (max(0, denominator - distance * distance) / denominator) ** 0.5
         rows[x] = height - 1 - int((height - 2) * rise + 0.5)
     return rows
+
+
+class SolarCountdown:
+    """Keep only four dated events; parse on refresh and format once a minute."""
+    def __init__(self):
+        self.raw = None
+        self.events = ()
+        self.minute = None
+        self.value = None
+
+    def update(self, data, now_seconds, event_epoch):
+        if not data.get("forecast_ok", False):
+            self.minute = None
+            self.value = None
+            return None
+        rises = data.get("sunrise_times") or (data.get("sunrise_time"),)
+        sets = data.get("sunset_times") or (data.get("sunset_time"),)
+        if not isinstance(rises, (list, tuple)):
+            rises = (data.get("sunrise_time"),)
+        if not isinstance(sets, (list, tuple)):
+            sets = (data.get("sunset_time"),)
+        raw = (rises, sets, data.get("utc_offset_seconds", 0))
+        if raw != self.raw:
+            events = []
+            for kind, values in (("RISE", rises), ("SET", sets)):
+                for value in values[:2]:
+                    epoch = event_epoch(value, data)
+                    if epoch is not None:
+                        events.append((epoch, kind))
+            events.sort()
+            self.events = tuple(events)
+            self.raw = raw
+            self.minute = None
+        minute = int(now_seconds) // 60
+        if minute != self.minute:
+            self.minute = minute
+            self.value = None
+            for epoch, kind in self.events:
+                if now_seconds < epoch <= now_seconds + 172800:
+                    remaining = max(1, (epoch - int(now_seconds) + 59) // 60)
+                    text = "{}:{:02d}".format(remaining // 60, remaining % 60)
+                    # Cosmetic depletion over the last three hours, not moon phase.
+                    level = min(7, max(1, (remaining * 7 + 179) // 180))
+                    self.value = (kind, text, level)
+                    break
+        return self.value

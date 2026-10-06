@@ -12,12 +12,13 @@ from interstate75 import Interstate75, SWITCH_A
 import interstate75
 import time
 from network_recovery import Recovery
-from ambient_motion import UIDrift, start_fish_motion, move_fish, CLOUD_ROWS, FIN_ROWS, compile_glyph_runs, rainbow_profile
+from ambient_motion import UIDrift, start_fish_motion, move_fish, CLOUD_ROWS, FIN_ROWS, compile_glyph_runs, rainbow_profile, CLOUD_WIDTH, SolarCountdown
 import gc
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
 from config import (
     SCREEN_COUNT,
+    SHOW_SOLAR_COUNTDOWN,
     AMBIENT_ACTIVITY,
     UI_DRIFT_MINUTES,
     WIND_LEAF_THRESHOLD_KMH,
@@ -85,8 +86,8 @@ if type(SCREEN_COUNT) is not int or not 1 <= SCREEN_COUNT <= 4:
 WIDTH = 64 * SCREEN_COUNT
 HEIGHT = 64
 RAINBOW_DURATION_MS = 6000
-RAINBOW_COLOURS = ((52, 8, 8), (52, 24, 4), (48, 40, 4), (6, 40, 12),
-                   (6, 25, 52), (19, 10, 42), (38, 9, 42))
+RAINBOW_COLOURS = ((156, 24, 24), (156, 72, 12), (144, 120, 12), (18, 120, 36),
+                   (18, 75, 156), (57, 30, 126), (114, 27, 126))
 RAINBOW_ROWS = rainbow_profile(WIDTH, HEIGHT)
 RAINBOW = {"start_ms": None, "last_key": None}
 try:
@@ -101,6 +102,7 @@ BAR_WIDTH = 60 + (WIDTH - 64) * 3 // 4
 BAR_LEFT = (WIDTH - BAR_WIDTH) // 2
 UI_SHIFT = (WIDTH - 64) // 2
 UI_DRIFT = UIDrift(UI_DRIFT_MINUTES * 60000)
+SOLAR_COUNTDOWN = SolarCountdown()
 BIRD_LIMIT = 3 if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY else 1
 UFO_LIMIT = 2 if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY else 1
 FISH_LIMIT = 2 if SCREEN_COUNT > 1 and AMBIENT_ACTIVITY else 1
@@ -421,6 +423,10 @@ FONT = {
     "I": ["1", "1", "1", "1", "1"],
     "M": ["101", "111", "111", "101", "101"],
     "N": ["101", "111", "111", "111", "101"],
+    "E": ["111", "100", "110", "100", "111"],
+    "R": ["110", "101", "110", "101", "101"],
+    "S": ["111", "100", "111", "001", "111"],
+    "T": ["111", "010", "010", "010", "010"],
     "X": ["101", "101", "010", "101", "101"],
     " ": ["0", "0", "0", "0", "0"],
 }
@@ -663,6 +669,69 @@ def sun_event_minutes(data):
         SUN_EVENT_CACHE["sunset"] = sunset_raw
         SUN_EVENT_CACHE["minutes"] = (event_minutes(sunrise_raw), event_minutes(sunset_raw))
     return SUN_EVENT_CACHE["minutes"]
+
+
+def solar_event_epoch(value, data):
+    """Dated forecast wall time -> the device's UTC epoch (including UK DST)."""
+    try:
+        if (not isinstance(value, str) or len(value) < 16 or value[10] != "T"
+                or value[4] != "-" or value[7] != "-" or value[13] != ":"):
+            return None
+        parts = (int(value[:4]), int(value[5:7]), int(value[8:10]),
+                 int(value[11:13]), int(value[14:16]), 0, 0, 0)
+        naive = time.mktime(parts)
+        if time.localtime(naive)[:5] != parts[:5]:
+            return None
+        if value.endswith("Z"):
+            return naive
+        offset = (uk_utc_offset_hours(time.localtime(naive)) * 3600
+                  if TIMEZONE == "Europe/London" else
+                  safe_int(data.get("utc_offset_seconds"), LOCAL_TIME_CACHE["utc_offset_seconds"]))
+        return naive - offset
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def draw_solar_countdown(data, drift_step):
+    """Compact spare-right-side UI; no footprint on a single 64x64 panel."""
+    if SCREEN_COUNT < 2 or not SHOW_SOLAR_COUNTDOWN or local_time_parts()[0] < 2020:
+        return
+    now = LOCAL_TIME_CACHE["epoch_second"]
+    if now is None:
+        return
+    value = SOLAR_COUNTDOWN.update(data, now, solar_event_epoch)
+    if value is None:
+        return  # Never recycle expired/yesterday's times into a new day.
+    kind, text, level = value
+    centre = (WIDTH + UI_SHIFT + 64) // 2 + drift_step
+    label_x = centre - pixel_text_width(kind) // 2
+    text_x = centre - pixel_text_width(text) // 2
+    pen = cached_pen((55, 55, 55) if any(NETWORK_FAULTS) else (85, 85, 85))
+    outline_pixel_text(kind, label_x, 19)
+    outline_pixel_text(text, text_x, 35)
+    draw_pixel_text(kind, label_x, 19, pen)
+    draw_pixel_text(text, text_x, 35, pen)
+    # Clear a tiny icon silhouette so moving backgrounds don't change its shape.
+    graphics.set_pen(BLACK)
+    graphics.rectangle(centre - 6, 25, 13, 9)
+    if kind == "SET":
+        horizon = 32
+        drop = 7 - level
+        graphics.set_pen(cached_pen((155, 94, 15)))
+        for dy, half in enumerate((1, 2, 3, 3, 3, 2, 1)):
+            yy = 25 + dy + drop
+            if yy < horizon:
+                graphics.rectangle(centre - half, yy, half * 2 + 1, 1)
+        graphics.set_pen(cached_pen((95, 75, 45)))
+        graphics.rectangle(centre - 5, horizon, 11, 1)
+    else:
+        # A shrinking crescent represents time remaining, not astronomical phase.
+        radius = 1 + (level - 1) // 3
+        graphics.set_pen(cached_pen((135, 145, 170)))
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dx * dx + dy * dy <= radius * radius and (dx - 2) * (dx - 2) + dy * dy > radius * radius:
+                    draw_visible_pixel(centre + dx, 29 + dy)
 
 
 def is_after_sunset(data):
@@ -1617,7 +1686,7 @@ def draw_flood_fish(now_ms, state=None):
 
 
 def draw_clouds(data, now_ms):
-    """One dim, slow cloud on dry overcast days; never a second weather layer."""
+    """One bright cartoon cloud on dry overcast days, behind foreground content."""
     quiet = (safe_float(data.get("rain_mm")) + safe_float(data.get("showers_mm")) <= 0
              and safe_float(data.get("snowfall_cm")) <= 0
              and not data.get("storm_warning", False))
@@ -1642,18 +1711,30 @@ def draw_clouds(data, now_ms):
         CLOUD_STATE["right"] = bool(roll & 1)
         CLOUD_STATE["y"] = 6 + ((roll >> 3) % 25)
         # Keep cloud speed gentle even on a wider display.
-        CLOUD_STATE["duration_ms"] = (WIDTH + 46) * (380 + ((roll >> 7) % 151))
+        CLOUD_STATE["duration_ms"] = (WIDTH + 2 * CLOUD_WIDTH) * (380 + ((roll >> 7) % 151))
     elapsed = time.ticks_diff(now_ms, CLOUD_STATE["start_ms"])
     duration = CLOUD_STATE["duration_ms"]
     if elapsed >= duration:
         CLOUD_STATE["active"] = False
         CLOUD_STATE["next_ms"] = 0
         return
-    progress = elapsed * (WIDTH + 46) // duration
-    x = -23 + progress if CLOUD_STATE["right"] else WIDTH + 23 - progress
-    graphics.set_pen(cached_pen((19, 23, 28)))
-    for dy, (left, right) in enumerate(CLOUD_ROWS):
-        graphics.rectangle(x + left, CLOUD_STATE["y"] + dy, right - left + 1, 1)
+    progress = elapsed * (WIDTH + 2 * CLOUD_WIDTH) // duration
+    x = -CLOUD_WIDTH + progress if CLOUD_STATE["right"] else WIDTH + CLOUD_WIDTH - progress
+    y = CLOUD_STATE["y"]
+    graphics.set_pen(cached_pen((12, 16, 24)))
+    for dy, segments in enumerate(CLOUD_ROWS):
+        for left, right in segments:
+            graphics.rectangle(x + left, y + dy, right - left + 1, 1)
+    graphics.set_pen(cached_pen((78, 94, 116)))
+    for dy in range(1, len(CLOUD_ROWS) - 1):
+        for left, right in CLOUD_ROWS[dy]:
+            graphics.rectangle(x + left + 1, y + dy, right - left - 1, 1)
+    graphics.set_pen(cached_pen((138, 149, 165)))
+    for dx, dy, length in ((10, 2, 4), (9, 3, 5), (23, 3, 2), (22, 4, 4), (4, 6, 6)):
+        graphics.rectangle(x + dx, y + dy, length, 1)
+    graphics.set_pen(cached_pen((48, 64, 85)))
+    graphics.rectangle(x + 4, y + 9, 26, 1)
+    graphics.rectangle(x + 6, y + 10, 22, 1)
 
 
 def draw_surface_event(now_ms):
@@ -1737,9 +1818,9 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     update_abduction(data, now_ms)
     draw_night_sky(data, now_ms)
     draw_day_rainbow(data, now_ms)
+    draw_clouds(data, now_ms)
     draw_weather_particles(data, now_ms)
     draw_ground_accumulation(data, now_ms)
-    draw_clouds(data, now_ms)
     draw_surface_event(now_ms)
 
     temperature = data.get("temperature_c", "--")
@@ -1761,12 +1842,16 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     )
 
     clock_pen = animated_pen((85, 85, 85), pulses.amount("clock", now_ms))
+    if CLOUD_STATE["active"] or RAINBOW["start_ms"] is not None:
+        outline_pixel_text(clock_text, 2 + header_drift, 3, scale=2)
     draw_pixel_text(
         clock_text, 2 + header_drift, 3,
         clock_pen,
         scale=2,
     )
     humidity_x = WIDTH - 2 + header_drift - pixel_text_width(humidity_text, scale=2)
+    if CLOUD_STATE["active"] or RAINBOW["start_ms"] is not None:
+        outline_pixel_text(humidity_text, humidity_x, 3, scale=2)
     draw_pixel_text(
         humidity_text, humidity_x, 3,
         animated_pen((0, 95, 105), pulses.amount("humidity", now_ms)),
@@ -1829,6 +1914,7 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
             thickness=2,
         )
 
+    draw_solar_countdown(data, drift_step)
     for state in FISH_STATES:
         draw_flood_fish(now_ms, state)
     for state in BIRD_STATES:
