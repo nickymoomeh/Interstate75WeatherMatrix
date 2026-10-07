@@ -9,6 +9,7 @@ class Clock:
  def ticks_diff(self,a,b): return ((a-b+(1<<29))%(1<<30))-(1<<29)
  def time(self): return self.epoch + self.now//1000
  def localtime(self,t=None): return real_time.gmtime(self.time() if t is None else t)
+ def gmtime(self,t=None): return self.localtime(t)
  def mktime(self,t): return __import__("calendar").timegm(tuple(t)+(0,) if len(t)==8 else t)
  def sleep(self,n): pass
  def sleep_ms(self,n): self.now+=n

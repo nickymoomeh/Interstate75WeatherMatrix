@@ -692,6 +692,15 @@ def solar_event_epoch(value, data):
         return None
 
 
+def solar_event_clock(epoch, data):
+    """Local HH:MM at the event, using the event date's timezone rules."""
+    offset = (uk_utc_offset_hours(time.localtime(epoch)) * 3600
+              if TIMEZONE == "Europe/London" else
+              safe_int(data.get("utc_offset_seconds"), LOCAL_TIME_CACHE["utc_offset_seconds"]))
+    parts = time.localtime(epoch + offset)
+    return "{:02d}:{:02d}".format(parts[3], parts[4])
+
+
 def draw_solar_countdown(data, drift_step):
     """Compact spare-right-side UI; no footprint on a single 64x64 panel."""
     if SCREEN_COUNT < 2 or not SHOW_SOLAR_COUNTDOWN or local_time_parts()[0] < 2020:
@@ -699,7 +708,7 @@ def draw_solar_countdown(data, drift_step):
     now = LOCAL_TIME_CACHE["epoch_second"]
     if now is None:
         return
-    value = SOLAR_COUNTDOWN.update(data, now, solar_event_epoch)
+    value = SOLAR_COUNTDOWN.update(data, now, solar_event_epoch, solar_event_clock)
     if value is None:
         return  # Never recycle expired/yesterday's times into a new day.
     kind, text, level = value
@@ -711,9 +720,7 @@ def draw_solar_countdown(data, drift_step):
     outline_pixel_text(text, text_x, 35)
     draw_pixel_text(kind, label_x, 19, pen)
     draw_pixel_text(text, text_x, 35, pen)
-    # Clear a tiny icon silhouette so moving backgrounds don't change its shape.
-    graphics.set_pen(BLACK)
-    graphics.rectangle(centre - 6, 25, 13, 9)
+    # Transparent icon: paint only its pixels, never cut a black box into water.
     if kind == "SET":
         horizon = 32
         drop = 7 - level
@@ -1686,7 +1693,7 @@ def draw_flood_fish(now_ms, state=None):
     draw_visible_pixel(x + direction * (width - 3), y + middle)
 
 
-def draw_air_visitors(data, now_ms):
+def draw_air_visitors(data, now_ms, render=True):
     """A shared sparse aircraft slot, behind weather/readings and foreground actors."""
     # Include the snow-bank relief; landings also require a two-pixel margin.
     surface = HEIGHT - GROUND_STATE["level"] - (1 if GROUND_STATE["kind"] == "snow" else 0)
@@ -1703,8 +1710,8 @@ def draw_air_visitors(data, now_ms):
             perches |= bit
     AIR_VISITOR.update(now_ms, WIDTH, is_daylight(data), AMBIENT_ACTIVITY,
                        surface, perches, BAR_LEFT, BAR_WIDTH)
-    if AIR_VISITOR.active:
-        draw_air_sprite(AIR_VISITOR, now_ms, graphics, cached_pen)
+    if render and AIR_VISITOR.active:
+        draw_air_sprite(AIR_VISITOR, now_ms, graphics, cached_pen, surface)
 
 
 def draw_surface_event(now_ms):
@@ -1790,10 +1797,14 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     draw_day_rainbow(data, now_ms)
     # Check landings against this frame's ground, including a new server level.
     update_ground_state(data, now_ms)
-    draw_air_visitors(data, now_ms)
+    draw_air_visitors(data, now_ms, render=False)
     draw_weather_particles(data, now_ms)
     draw_ground_accumulation(data, now_ms, updated=True)
     draw_surface_event(now_ms)
+    draw_solar_countdown(data, drift_step)
+    if AIR_VISITOR.active:
+        surface = HEIGHT - GROUND_STATE["level"] - (1 if GROUND_STATE["kind"] == "snow" else 0)
+        draw_air_sprite(AIR_VISITOR, now_ms, graphics, cached_pen, surface)
 
     temperature = data.get("temperature_c", "--")
     humidity = data.get("humidity", "--")
@@ -1886,7 +1897,6 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
             thickness=2,
         )
 
-    draw_solar_countdown(data, drift_step)
     for state in FISH_STATES:
         draw_flood_fish(now_ms, state)
     for state in BIRD_STATES:

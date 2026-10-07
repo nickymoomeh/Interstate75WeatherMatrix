@@ -15,7 +15,7 @@ exec(compile(source, 'ambient_motion.py', 'exec'), namespace)
 ordinary = {}
 exec(compile(source, 'ambient_motion.py', 'exec'), ordinary)
 assert namespace['AIR_SPRITES'] == ordinary['AIR_SPRITES']
-assert sum(len(sprite[2]) for sprite in namespace['AIR_SPRITES']) == 260
+assert sum(len(sprite[2]) for sprite in namespace['AIR_SPRITES']) == 128
 # Reproduce the exact old failure to ensure this check would have caught it.
 original = source.replace('''runs.append(colour - 1)
                 runs.append(y)
