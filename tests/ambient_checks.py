@@ -200,7 +200,7 @@ def exercise(env, clock):
     env['UI_DRIFT'].offset = 0
     aircraft = env['AIR_VISITOR']
     aircraft.active = True
-    aircraft.kind = 1
+    aircraft.kind = 0
     aircraft.phase = 'roam'
     aircraft.x_q = (width // 2 - 14) * 1000
     aircraft.y_q = 6000

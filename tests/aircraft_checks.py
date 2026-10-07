@@ -13,7 +13,7 @@ def exercise(env, clock):
     def update(visitor, now, day=True, surface=64, perches=3, enabled=True):
         visitor.update(clock.ticks_add(0, now), width, day, enabled, surface, perches, left, bar)
 
-    def airborne(kind=1, phase='roam'):
+    def airborne(kind=0, phase='roam'):
         visitor = AirVisitor()
         visitor.active = True
         visitor.kind = kind
@@ -29,13 +29,13 @@ def exercise(env, clock):
 
     try:
         # Native-sized shared run sprites, all pixels inside their declared bounds.
-        assert [s[:2] for s in AIR_SPRITES] == [(33, 12), (29, 12)]
+        assert [s[:2] for s in AIR_SPRITES] == [(29, 12)]
         assert sum(len(s[2]) for s in AIR_SPRITES) < 700
         for sw, height, runs in AIR_SPRITES:
             assert all(runs[i + 1] < height and runs[i + 2] + runs[i + 3] <= sw
                        for i in range(0, len(runs), 4))
         # Five palettes and both directions; mirroring preserves exact sprite pixels.
-        for kind in (0, 1):
+        for kind in (0,):
             visitor = airborne(kind)
             visitor.x_q = ((64 if width > 64 else 32) - 16) * 1000
             for style in range(5):
@@ -53,6 +53,10 @@ def exercise(env, clock):
                 if width > 64:
                     assert any(x < 64 for x, y in pixels[0]) # Local sprite coordinates.
                     assert any(x < 64 < x + w for x, y, w, h in graphics.rects)
+        # A helicopter is foreground over the solar icon, but never paints below water.
+        visitor = airborne();visitor.y_q = 28000
+        graphics.clear();draw_air_sprite(visitor, 0, graphics, env['cached_pen'], surface=32)
+        assert graphics.rects and all(y < 32 for x,y,w,h in graphics.rects)
         # Scheduled gaps begin after visits; night gets much rarer opportunities.
         for day in (True, False):
             visitor = AirVisitor()
@@ -68,14 +72,14 @@ def exercise(env, clock):
         visitor = AirVisitor();update(visitor, 0);day_due = visitor.next_ms
         update(visitor, day_due - 1, day=False)
         assert clock.ticks_diff(visitor.next_ms, day_due) > 600000
-        # Fixed-point speed stays 2 px/s at all widths and caps frame gaps.
+        # Fixed-point speed stays 4 px/s at all widths and caps frame gaps.
         visitor = airborne()
         origin = visitor.x_q
         update(visitor, 125)
-        assert visitor.x_q - origin == 250
+        assert visitor.x_q - origin == 500
         origin = visitor.x_q
         update(visitor, 8000)
-        assert visitor.x_q - origin == 500
+        assert visitor.x_q - origin == 1000
         # Force pause and reversal, preserving position and independent visitor state.
         for action in (0, 1):
             module.seed = lambda _, a=action: a << 6
@@ -93,7 +97,7 @@ def exercise(env, clock):
             visitor = airborne();visitor.landing_used = False;visitor.decision_ms = 125
             update(visitor, 125, perches=mask)
             assert visitor.phase == 'land' and visitor.perch == perch
-            assert left + 2 <= visitor.target_x <= left + bar - AIR_SPRITES[1][0] - 2
+            assert left + 2 <= visitor.target_x <= left + bar - AIR_SPRITES[0][0] - 2
             for now in range(250, 120000, 125):
                 update(visitor, now, perches=mask)
                 if visitor.phase == 'park':
@@ -103,7 +107,7 @@ def exercise(env, clock):
             graphics.clear();draw_air_sprite(visitor, now, graphics, env['cached_pen'])
             assert max(y + h - 1 for x, y, w, h in graphics.rects) == perch - 1
             # Normal takeoff is gradual, then exits; no second landing on this visit.
-            park_end = now + 6000
+            park_end = now + 3000
             update(visitor, park_end, perches=mask)
             assert visitor.phase == 'lift'
             for t in range(park_end + 125, park_end + 240000, 125):
@@ -119,6 +123,21 @@ def exercise(env, clock):
         visitor = airborne();visitor.landing_used = False;visitor.decision_ms = 125
         update(visitor, 125, perches=0)
         assert visitor.phase != 'land'
+        # Ordinary visits now finish promptly; no repeated hovering/turning loop.
+        durations = []
+        for roll in (0, 64, 128, 192, 256, 1, 65, 129):
+            module.seed = lambda _, value=roll: value | (3 << 19)
+            visitor = AirVisitor();visitor.scheduled_day = True;visitor.next_ms = 0
+            for now in range(0, 100000, 125):
+                update(visitor, now)
+                if now > 0 and not visitor.active:
+                    break
+            assert not visitor.active
+            durations.append(now)
+            assert visitor.manoeuvres <= 1
+        assert max(durations) <= ((width + 29) * 250 + 20000), durations
+        print('Ordinary helicopter visits:', min(durations)//1000, '-', max(durations)//1000, 'seconds')
+        module.seed = original_seed
         # Real wrapper allows aircraft during rain/snow/storm and blocks unsafe perches.
         saved = env['AIR_VISITOR']
         try:

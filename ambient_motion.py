@@ -90,22 +90,9 @@ def _air_sprite(rows, width):
     return width, len(rows), bytes(runs)
 
 
-# Both aircraft keep their pixel size on every panel count. Nose points right.
+# Helicopters keep their pixel size on every panel count. Nose points right.
 # 1 outline, 2 body, 3 highlight, 4 shade, 5 glass; empty pixels are transparent.
 AIR_SPRITES = (
-    _air_sprite((
-        '          11111111111',
-        '       11133333333333111',
-        '     113333333333333322211',
-        '  11122222222222222222222211',
-        '11222222222222222222222222221',
-        ' 122222222222222222222222222221',
-        '112444444444444444444444444441',
-        '  111444444444444444444444411',
-        '     1111111111111111111111',
-        '              1     1',
-        '             122555221',
-        '              1111111'), 33),
     _air_sprite((
         '',
         '                1',
@@ -156,7 +143,8 @@ class AirVisitor:
         self.perch = 16
         self.landing_used = False
         self.turns = 0
-        self.roam_ms = 60000
+        self.roam_ms = 16000
+        self.manoeuvres = 0
 
     def update(self, now_ms, width, daylight, enabled, surface, perches, bar_left, bar_width):
         if not enabled:
@@ -180,24 +168,25 @@ class AirVisitor:
             self.active = True
             self.start_ms = self.last_ms = self.phase_ms = now_ms
             self.phase = 'enter'
-            self.kind = (roll >> 4) & 1
+            self.kind = 0
             self.style = (roll >> 7) % len(AIR_COLOURS)
             self.right = bool(roll & 1)
             sprite_width, height, _ = AIR_SPRITES[self.kind]
             self.x_q = (-sprite_width if self.right else width) * 1000
             self.target_y = min(6 + ((roll >> 12) % 22), max(2, surface - height - 3))
             self.y_q = self.target_y * 1000
-            self.decision_ms = time.ticks_add(now_ms, 6000)
+            self.decision_ms = time.ticks_add(now_ms, 9000)
             self.pause_until = now_ms
             # Only about one quarter of helicopter visits may try a landing.
-            self.landing_used = self.kind == 0 or not daylight or ((roll >> 19) & 3) != 0
+            self.landing_used = not daylight or ((roll >> 19) & 3) != 0
             self.turns = 0
-            self.roam_ms = 40000 + ((roll >> 9) % 30001)
+            self.roam_ms = (6000 if width == 64 else 10000) + ((roll >> 9) % (6001 if width == 64 else 8001))
+            self.manoeuvres = 0
         dt = max(0, min(250, time.ticks_diff(now_ms, self.last_ms)))
         self.last_ms = now_ms
         sprite_width, height, _ = AIR_SPRITES[self.kind]
         max_y = max(2, min(30, surface - height - 3))
-        if time.ticks_diff(now_ms, self.start_ms) >= 210000 and self.phase != 'exit':
+        if time.ticks_diff(now_ms, self.start_ms) >= 120000 and self.phase != 'exit':
             self.phase = 'exit'
             self.target_y = min(self.target_y, max_y)
         if self.phase in ('land', 'park') and (not (perches & (1 if self.perch == 16 else 2))):
@@ -205,19 +194,19 @@ class AirVisitor:
             self.phase = 'lift'
             self.target_y = max(2, min(max_y, self.perch - height - 7))
         if self.phase == 'park':
-            if time.ticks_diff(now_ms, self.phase_ms) >= 6000 + self.style * 1000:
+            if time.ticks_diff(now_ms, self.phase_ms) >= 3000 + (self.style // 2) * 1000:
                 self.phase = 'lift'
                 self.target_y = max(2, min(max_y, self.perch - height - 7))
             return
         if self.phase == 'land':
-            self.x_q = _towards(self.x_q, self.target_x * 1000, dt * 3)
-            self.y_q = _towards(self.y_q, (self.perch - height) * 1000, dt)
+            self.x_q = _towards(self.x_q, self.target_x * 1000, dt * 4)
+            self.y_q = _towards(self.y_q, (self.perch - height) * 1000, dt * 2)
             if self.x_q == self.target_x * 1000 and self.y_q == (self.perch - height) * 1000:
                 self.phase = 'park'
                 self.phase_ms = now_ms
             return
         self.target_y = min(self.target_y, max_y)
-        self.y_q = _towards(self.y_q, self.target_y * 1000, dt)
+        self.y_q = _towards(self.y_q, self.target_y * 1000, dt * (2 if self.phase == 'lift' else 1))
         if self.phase == 'lift':
             if self.y_q == self.target_y * 1000:
                 self.phase = 'exit'
@@ -225,7 +214,8 @@ class AirVisitor:
         if self.phase == 'roam':
             if time.ticks_diff(now_ms, self.phase_ms) >= self.roam_ms:
                 self.phase = 'exit'
-            elif time.ticks_diff(now_ms, self.decision_ms) >= 0:
+            elif self.manoeuvres == 0 and time.ticks_diff(now_ms, self.decision_ms) >= 0:
+                self.manoeuvres = 1
                 roll = seed(now_ms // 100 + self.style * 137)
                 self.decision_ms = time.ticks_add(now_ms, 5000 + roll % 4001)
                 if not self.landing_used and perches:
@@ -233,23 +223,24 @@ class AirVisitor:
                     self.perch = 42 if perches & 2 and roll & 1 else 16
                     if not (perches & 1):
                         self.perch = 42
-                    self.target_x = bar_left + 2 + ((roll >> 8) % max(1, bar_width - sprite_width - 3))
+                    self.target_x = min(bar_left + bar_width - sprite_width - 2,
+                                        max(bar_left + 2, self.x_q // 1000 + ((roll >> 8) % 13) - 6))
                     self.phase = 'land'
                     return
                 action = (roll >> 6) % 5
                 if action == 0:
-                    self.pause_until = time.ticks_add(now_ms, 3000 + roll % 4001)
-                elif action == 1 and self.turns < 2:
+                    self.pause_until = time.ticks_add(now_ms, 1500 + roll % 1501)
+                elif action == 1 and self.turns < 1:
                     self.right = not self.right
                     self.turns += 1
-                self.target_y = 2 + ((roll >> 10) % max(1, max_y - 1))
+                self.target_y = max(2, min(max_y, self.y_q // 1000 + ((roll >> 10) % 7) - 3))
             if self.phase == 'roam':
                 if self.x_q <= 1000:
                     self.right = True
                 elif self.x_q >= (width - sprite_width - 1) * 1000:
                     self.right = False
         if self.phase != 'roam' or time.ticks_diff(now_ms, self.pause_until) >= 0:
-            self.x_q += (1 if self.right else -1) * dt * 2
+            self.x_q += (1 if self.right else -1) * dt * 4
         if self.phase == 'enter' and 0 <= self.x_q <= (width - sprite_width) * 1000:
             self.phase = 'roam'
             self.phase_ms = now_ms
@@ -258,7 +249,7 @@ class AirVisitor:
             self.next_ms = None
 
 
-def draw_air_sprite(visitor, now_ms, graphics, pen):
+def draw_air_sprite(visitor, now_ms, graphics, pen, surface=64):
     width, height, runs = AIR_SPRITES[visitor.kind]
     bob = 0 if visitor.phase in ('land', 'park', 'lift') else (0, 1, 0, -1)[(now_ms // 1000) % 4]
     x, y = visitor.x_q // 1000, visitor.y_q // 1000 + bob
@@ -270,14 +261,20 @@ def draw_air_sprite(visitor, now_ms, graphics, pen):
             graphics.set_pen(pen(colours[colour]))
             previous = colour
         dx = left if visitor.right else width - left - length
-        graphics.rectangle(x + dx, y + dy, length, 1)
-    if visitor.kind == 1:
-        graphics.set_pen(pen((130, 135, 140)))
-        # At 8 FPS a changing rotor span is readable without frantic flashing.
-        span = 25 if visitor.phase == 'park' or (now_ms // 250) & 1 else 17
-        left = 16 - span // 2
-        dx = left if visitor.right else width - left - span
-        graphics.rectangle(x + dx, y, span, 1)
+        if y + dy < surface:
+            graphics.rectangle(x + dx, y + dy, length, 1)
+    if y < surface:
+        # Keep a steady rotor silhouette; a tiny glint suggests rotation without
+        # the old large span changes that looked like blinking/shrinking blades.
+        graphics.set_pen(pen((90, 95, 105)))
+        left = 4
+        dx = left if visitor.right else width - left - 25
+        graphics.rectangle(x + dx, y, 25, 1)
+        if visitor.phase != 'park':
+            graphics.set_pen(pen((135, 140, 150)))
+            left = (4, 10, 16, 10)[(now_ms // 250) % 4]
+            dx = left if visitor.right else width - left - 4
+            graphics.rectangle(x + dx, y, 4, 1)
 
 
 FIN_ROWS = ((6, 6), (5, 6), (4, 6), (3, 7), (2, 8))
@@ -317,14 +314,14 @@ def rainbow_profile(width, height):
 
 
 class SolarCountdown:
-    """Keep only four dated events; parse on refresh and format once a minute."""
+    """Cache four dated events; select local HH:MM and icon progress once a minute."""
     def __init__(self):
         self.raw = None
         self.events = ()
         self.minute = None
         self.value = None
 
-    def update(self, data, now_seconds, event_epoch):
+    def update(self, data, now_seconds, event_epoch, event_clock):
         if not data.get("forecast_ok", False):
             self.minute = None
             self.value = None
@@ -354,7 +351,7 @@ class SolarCountdown:
             for epoch, kind in self.events:
                 if now_seconds < epoch <= now_seconds + 172800:
                     remaining = max(1, (epoch - int(now_seconds) + 59) // 60)
-                    text = "{}:{:02d}".format(remaining // 60, remaining % 60)
+                    text = event_clock(epoch, data)
                     # Cosmetic depletion over the last three hours, not moon phase.
                     level = min(7, max(1, (remaining * 7 + 179) // 180))
                     self.value = (kind, text, level)
