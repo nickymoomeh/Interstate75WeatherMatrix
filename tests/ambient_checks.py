@@ -110,15 +110,6 @@ def exercise(env, clock):
     env['draw_surface_event'](5000)
     assert not event['active']
 
-    # Cloud is behind readings, dry/daytime only; test appearance and suppression.
-    cloud = env['CLOUD_STATE']
-    cloud.update(active=False, next_ms=1000)
-    graphics.clear()
-    env['draw_clouds'](data, 1000)
-    assert cloud['active'] and graphics.rects
-    env['draw_clouds'](dict(data, rain_mm=1), 1125)
-    assert not cloud['active']
-
     # The reported light-breeze sample draws leaves; calm weather does not.
     graphics.clear()
     env['draw_weather_particles'](dict(data, wind_speed_kmh=5.4,
@@ -140,7 +131,7 @@ def exercise(env, clock):
 
     # Render only static content at every drift extreme and both warning alternatives.
     function_names = ('update_abduction', 'draw_night_sky', 'draw_weather_particles',
-                      'draw_ground_accumulation', 'draw_clouds', 'draw_surface_event',
+                      'draw_ground_accumulation', 'draw_air_visitors', 'draw_surface_event',
                       'draw_flood_fish', 'draw_day_creature', 'draw_ufo', 'draw_abduction',
                       'draw_warning_edges')
     functions = {name: env[name] for name in function_names}
@@ -207,7 +198,19 @@ def exercise(env, clock):
                           last_motion_ms=3000, quirky=False)
     event.update(active=True, start_ms=0, next_ms=1000, kind='fin', right=True)
     env['UI_DRIFT'].offset = 0
+    aircraft = env['AIR_VISITOR']
+    aircraft.active = True
+    aircraft.kind = 1
+    aircraft.phase = 'roam'
+    aircraft.x_q = (width // 2 - 14) * 1000
+    aircraft.y_q = 6000
+    aircraft.target_y = 6
+    aircraft.start_ms = aircraft.last_ms = aircraft.phase_ms = 3000
+    aircraft.decision_ms = 9000
+    aircraft.pause_until = 3000
+    aircraft.landing_used = True
     env['draw_weather'](storm_data, 3000, env['PulseTracker']())
+    assert aircraft.active
     assert all(0 <= x < width and 0 <= y < 64 for x, y in graphics.pixels)
     assert all(s['active'] for s in env['BIRD_STATES'])
     assert all(s['active'] for s in env['UFO_STATES'])

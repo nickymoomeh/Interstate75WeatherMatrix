@@ -40,7 +40,7 @@ def exercise(env, clock):
     graphics = env['graphics']
     original_parts = env['LOCAL_TIME_CACHE']['parts']
     original_epoch = env['LOCAL_TIME_CACHE']['epoch_second']
-    saved = {name: env[name] for name in ('draw_day_rainbow', 'draw_clouds', 'draw_weather_particles',
+    saved = {name: env[name] for name in ('draw_day_rainbow', 'draw_air_visitors', 'draw_weather_particles',
                  'draw_ground_accumulation', 'draw_surface_event', 'draw_solar_countdown',
                  'draw_flood_fish', 'draw_day_creature', 'draw_ufo')}
     try:
@@ -69,13 +69,13 @@ def exercise(env, clock):
         graphics.clear();env['draw_solar_countdown'](data, 0)
         assert not graphics.rects and not graphics.pixels
         env['SHOW_SOLAR_COUNTDOWN'] = enabled
-        # Verify the actual display call order: clouds and rainbow under water/text/actors.
+        # Verify the actual display call order: aircraft and rainbow under water/text/actors.
         order = []
         for name in saved:
             env[name] = lambda *args, n=name, **kwargs: order.append(n)
         env['draw_weather'](env['get_demo_weather'](), 3000, env['PulseTracker']())
-        assert order.index('draw_day_rainbow') < order.index('draw_clouds') < order.index('draw_ground_accumulation')
-        assert order.index('draw_clouds') < order.index('draw_solar_countdown') < order.index('draw_flood_fish')
+        assert order.index('draw_day_rainbow') < order.index('draw_air_visitors') < order.index('draw_ground_accumulation')
+        assert order.index('draw_air_visitors') < order.index('draw_solar_countdown') < order.index('draw_flood_fish')
         assert order.index('draw_solar_countdown') < order.index('draw_day_creature')
         assert all(max(colour) >= 120 for colour in env['RAINBOW_COLOURS'])
     finally:

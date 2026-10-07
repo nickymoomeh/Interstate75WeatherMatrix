@@ -12,7 +12,7 @@ from interstate75 import Interstate75, SWITCH_A
 import interstate75
 import time
 from network_recovery import Recovery
-from ambient_motion import UIDrift, start_fish_motion, move_fish, CLOUD_ROWS, FIN_ROWS, compile_glyph_runs, rainbow_profile, CLOUD_WIDTH, SolarCountdown
+from ambient_motion import UIDrift, start_fish_motion, move_fish, AirVisitor, draw_air_sprite, FIN_ROWS, compile_glyph_runs, rainbow_profile, SolarCountdown
 import gc
 
 from secrets import WIFI_SSID, WIFI_PASSWORD
@@ -166,7 +166,7 @@ for pool in (BIRD_STATES, UFO_STATES, FISH_STATES):
         state["slot"] = slot
 DAY_CREATURE, UFO_STATE, FISH_STATE = BIRD_STATES[0], UFO_STATES[0], FISH_STATES[0]
 SURFACE_EVENT = {"active": False, "next_ms": 0, "start_ms": 0, "kind": "fin", "right": True}
-CLOUD_STATE = {"active": False, "next_ms": 0, "start_ms": 0, "right": True, "y": 6, "duration_ms": 45000}
+AIR_VISITOR = AirVisitor()
 
 
 
@@ -1534,8 +1534,9 @@ def update_ground_state(data, now_ms):
     GROUND_STATE["last_ms"] = now_ms
 
 
-def draw_ground_accumulation(data, now_ms):
-    update_ground_state(data, now_ms)
+def draw_ground_accumulation(data, now_ms, updated=False):
+    if not updated:
+        update_ground_state(data, now_ms)
     kind = GROUND_STATE["kind"]
     level = GROUND_STATE["level"]
     if not kind or level <= 0:
@@ -1685,56 +1686,25 @@ def draw_flood_fish(now_ms, state=None):
     draw_visible_pixel(x + direction * (width - 3), y + middle)
 
 
-def draw_clouds(data, now_ms):
-    """One bright cartoon cloud on dry overcast days, behind foreground content."""
-    quiet = (safe_float(data.get("rain_mm")) + safe_float(data.get("showers_mm")) <= 0
-             and safe_float(data.get("snowfall_cm")) <= 0
-             and not data.get("storm_warning", False))
-    code = safe_int(data.get("weather_code"), -1)
-    cloud_cover = safe_float(data.get("cloud_cover"), -1)
-    cloudy = data.get("forecast_ok", False) and (code in (2, 3, 45, 48) or cloud_cover >= 65)
-    if not AMBIENT_ACTIVITY or not quiet or not cloudy or not is_daylight(data):
-        CLOUD_STATE["active"] = False
-        CLOUD_STATE["next_ms"] = 0
-        return
-    if CLOUD_STATE["next_ms"] == 0:
-        roll = star_seed(now_ms // 1000 + 1999)
-        wait = (150000 if SCREEN_COUNT > 1 else 300000) + roll % 180001
-        CLOUD_STATE["next_ms"] = time.ticks_add(now_ms, wait)
-        return
-    if not CLOUD_STATE["active"]:
-        if time.ticks_diff(now_ms, CLOUD_STATE["next_ms"]) < 0:
-            return
-        roll = star_seed(now_ms // 100 + 2137)
-        CLOUD_STATE["active"] = True
-        CLOUD_STATE["start_ms"] = now_ms
-        CLOUD_STATE["right"] = bool(roll & 1)
-        CLOUD_STATE["y"] = 6 + ((roll >> 3) % 25)
-        # Keep cloud speed gentle even on a wider display.
-        CLOUD_STATE["duration_ms"] = (WIDTH + 2 * CLOUD_WIDTH) * (380 + ((roll >> 7) % 151))
-    elapsed = time.ticks_diff(now_ms, CLOUD_STATE["start_ms"])
-    duration = CLOUD_STATE["duration_ms"]
-    if elapsed >= duration:
-        CLOUD_STATE["active"] = False
-        CLOUD_STATE["next_ms"] = 0
-        return
-    progress = elapsed * (WIDTH + 2 * CLOUD_WIDTH) // duration
-    x = -CLOUD_WIDTH + progress if CLOUD_STATE["right"] else WIDTH + CLOUD_WIDTH - progress
-    y = CLOUD_STATE["y"]
-    graphics.set_pen(cached_pen((12, 16, 24)))
-    for dy, segments in enumerate(CLOUD_ROWS):
-        for left, right in segments:
-            graphics.rectangle(x + left, y + dy, right - left + 1, 1)
-    graphics.set_pen(cached_pen((78, 94, 116)))
-    for dy in range(1, len(CLOUD_ROWS) - 1):
-        for left, right in CLOUD_ROWS[dy]:
-            graphics.rectangle(x + left + 1, y + dy, right - left - 1, 1)
-    graphics.set_pen(cached_pen((138, 149, 165)))
-    for dx, dy, length in ((10, 2, 4), (9, 3, 5), (23, 3, 2), (22, 4, 4), (4, 6, 6)):
-        graphics.rectangle(x + dx, y + dy, length, 1)
-    graphics.set_pen(cached_pen((48, 64, 85)))
-    graphics.rectangle(x + 4, y + 9, 26, 1)
-    graphics.rectangle(x + 6, y + 10, 22, 1)
+def draw_air_visitors(data, now_ms):
+    """A shared sparse aircraft slot, behind weather/readings and foreground actors."""
+    # Include the snow-bank relief; landings also require a two-pixel margin.
+    surface = HEIGHT - GROUND_STATE["level"] - (1 if GROUND_STATE["kind"] == "snow" else 0)
+    perches = 0
+    for bit, perch in ((1, 16), (2, 42)):
+        if surface < perch + 2:
+            continue
+        occupied = False
+        for bird in BIRD_STATES:
+            if bird["active"] and bird["kind"] == "bird" and bird["perch"] == perch:
+                occupied = True
+                break
+        if not occupied:
+            perches |= bit
+    AIR_VISITOR.update(now_ms, WIDTH, is_daylight(data), AMBIENT_ACTIVITY,
+                       surface, perches, BAR_LEFT, BAR_WIDTH)
+    if AIR_VISITOR.active:
+        draw_air_sprite(AIR_VISITOR, now_ms, graphics, cached_pen)
 
 
 def draw_surface_event(now_ms):
@@ -1818,9 +1788,11 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     update_abduction(data, now_ms)
     draw_night_sky(data, now_ms)
     draw_day_rainbow(data, now_ms)
-    draw_clouds(data, now_ms)
+    # Check landings against this frame's ground, including a new server level.
+    update_ground_state(data, now_ms)
+    draw_air_visitors(data, now_ms)
     draw_weather_particles(data, now_ms)
-    draw_ground_accumulation(data, now_ms)
+    draw_ground_accumulation(data, now_ms, updated=True)
     draw_surface_event(now_ms)
 
     temperature = data.get("temperature_c", "--")
@@ -1842,7 +1814,7 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
     )
 
     clock_pen = animated_pen((85, 85, 85), pulses.amount("clock", now_ms))
-    if CLOUD_STATE["active"] or RAINBOW["start_ms"] is not None:
+    if AIR_VISITOR.active or RAINBOW["start_ms"] is not None:
         outline_pixel_text(clock_text, 2 + header_drift, 3, scale=2)
     draw_pixel_text(
         clock_text, 2 + header_drift, 3,
@@ -1850,7 +1822,7 @@ def draw_weather(data, now_ms, pulses, data_fault=False):
         scale=2,
     )
     humidity_x = WIDTH - 2 + header_drift - pixel_text_width(humidity_text, scale=2)
-    if CLOUD_STATE["active"] or RAINBOW["start_ms"] is not None:
+    if AIR_VISITOR.active or RAINBOW["start_ms"] is not None:
         outline_pixel_text(humidity_text, humidity_x, 3, scale=2)
     draw_pixel_text(
         humidity_text, humidity_x, 3,
