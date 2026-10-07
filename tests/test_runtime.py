@@ -74,6 +74,8 @@ for folder in roots:
   exercise_rainbow(env, clock)
   from solar_checks import exercise as exercise_solar
   exercise_solar(env, clock)
+  from aircraft_checks import exercise as exercise_aircraft
+  exercise_aircraft(env, clock)
   # Optional controls keep the original restrained population and centred UI.
   cfg.AMBIENT_ACTIVITY=False;cfg.UI_DRIFT_MINUTES=0
   restrained={}
@@ -82,9 +84,9 @@ for folder in roots:
   exec(restrained_prefix,restrained)
   assert all(len(restrained[name])==1 for name in ('BIRD_STATES','UFO_STATES','FISH_STATES'))
   restrained['is_daylight']=lambda _:True
-  restrained['CLOUD_STATE'].update(active=True,next_ms=1000,start_ms=0)
-  restrained['draw_clouds'](dict(data,forecast_ok=True,weather_code=3),1000)
-  assert not restrained['CLOUD_STATE']['active'] and restrained['UI_DRIFT_MINUTES']==0
+  restrained['AIR_VISITOR'].active=True
+  restrained['draw_air_visitors'](dict(data,forecast_ok=True,weather_code=3),1000)
+  assert not restrained['AIR_VISITOR'].active and restrained['UI_DRIFT_MINUTES']==0
   cfg.AMBIENT_ACTIVITY=True;cfg.UI_DRIFT_MINUTES=15
   # Exercise actual main-loop body once, including demo fetch scheduling.
   tree=ast.parse(s); loop=tree.body[-1];assert isinstance(loop,ast.While)
