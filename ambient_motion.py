@@ -82,7 +82,11 @@ def _air_sprite(rows, width):
                 left = x
                 while x < len(row) and row[x] == str(colour):
                     x += 1
-                runs.extend((colour - 1, y, left, x - left))
+                # MicroPython bytearray.extend requires a buffer, not a tuple.
+                runs.append(colour - 1)
+                runs.append(y)
+                runs.append(left)
+                runs.append(x - left)
     return width, len(rows), bytes(runs)
 
 
